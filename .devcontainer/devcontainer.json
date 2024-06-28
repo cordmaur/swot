@@ -11,7 +11,7 @@
 		// "source=/Users/cordmaur/Library/CloudStorage/OneDrive-AgeÌ‚nciaNacionaldeAÌguas/Trabalho/SOE/COVEC/RelatoriosChuva/reports_folder,target=/workspaces/reports_folder,type=bind",
 		// if running Windows
 		"source=D:/OneDrive/data,target=/data,type=bind",
-		// "source=D:/projects/Sentinel1-Flood-Finder,target=/workspaces/Sentinel1-Flood-Finder,type=bind",
+		"source=D:/projects/Waterdetect,target=/workspaces/waterdetect,type=bind",
 		// "source=D:/OneDrive/Trabalho/SOE/COVEC/RelatoriosChuva/reports_folder,target=/workspaces/reports_folder,type=bind"
 	],
 	"runArgs": [
@@ -35,7 +35,7 @@
 			]
 		}
 	},
-	"postCreateCommand": "pip install planetary-computer pystac-client stackstac earthaccess h5netcdf",
+	"postCreateCommand": "pip install planetary-computer pystac-client stackstac earthaccess h5netcdf odc-stack ipywidgets --no-cache-dir",
 	// "postCreateCommand": "pip install scikit-learn==1.2.2; pip install -e /workspaces/Sentinel1-Flood-Finder/.",
 	// Features to add to the dev container. More info: https://containers.dev/features.
 	// "features": {},
