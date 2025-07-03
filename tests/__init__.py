@@ -1,0 +1,1 @@
+"""Tests for swot_toolkit package."""

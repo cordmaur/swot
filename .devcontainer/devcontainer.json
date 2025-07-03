@@ -3,7 +3,7 @@
 {
 	"name": "WaterDetectImage",
 	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-	"image": "cordmaur/waterdetect:latest",
+	"image": "cordmaur/planetary:v4",
 	"mounts": [
 		// if running iMac
 		// "source=/Users/cordmaur/Library/CloudStorage/OneDrive-AgeÌ‚nciaNacionaldeAÌguas/Trabalho/SOE/COVEC/Bases,target=/workspaces/bases,type=bind",
@@ -35,7 +35,7 @@
 			]
 		}
 	},
-	"postCreateCommand": "pip install planetary-computer pystac-client stackstac earthaccess h5netcdf odc-stack ipywidgets --no-cache-dir",
+	"postCreateCommand": "pip install -e . --break-system-packages",
 	// "postCreateCommand": "pip install scikit-learn==1.2.2; pip install -e /workspaces/Sentinel1-Flood-Finder/.",
 	// Features to add to the dev container. More info: https://containers.dev/features.
 	// "features": {},
