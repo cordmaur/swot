@@ -4,13 +4,14 @@ import json
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import earthaccess
 import geopandas as gpd
 import pandas as pd
 import xarray as xr
 from pandas import Timestamp
+from shapely.geometry import Polygon, box
 from shapely.geometry.base import BaseGeometry
 
 from .utils import project_root
@@ -79,6 +80,71 @@ def auth_earthaccess() -> None:
     earthaccess.login(strategy="environment")
 
 
+SWOT_DATASET = Literal["Pixel Cloud", "Raster_100"]
+
+
+def search_swot_data(
+    aoi: BaseGeometry,
+    date_range: tuple[str, str] | None = None,
+    *,
+    dataset: SWOT_DATASET = "Pixel Cloud",
+) -> list[earthaccess.DataGranule]:
+    """Search for SWOT data granules within a specified area of interest (AOI).
+
+    This function uses Earth Access to search for SWOT data granules that intersect
+    with the provided AOI. It returns a list of DataGranule objects containing metadata.
+    It can search pixel cloud or raster products.
+
+    Parameters
+    ----------
+    aoi : BaseGeometry
+        Area of interest as a shapely geometry object (e.g., Polygon, MultiPolygon)
+
+    date_range : tuple[str, str], optional
+        Temporal range to filter the search results. If not provided, all available data is
+        returned.
+
+    dataset : Literal["Pixel Cloud", "Raster_100"]
+        The type of SWOT dataset to search for. Options are:
+        - "Pixel Cloud": Search for pixel cloud data granules
+        - "Raster_100": Search for raster (100m) data granules
+
+    Returns
+    -------
+    list[earthaccess.DataGranule]
+        List of DataGranule objects containing metadata for each SWOT data granule found
+
+    Notes
+    -----
+    The function requires Earth Access to be authenticated before calling.
+    The AOI should be in a projected coordinate system suitable for SWOT data.
+
+    Examples
+    --------
+    >>> from shapely.geometry import Polygon
+    >>> aoi = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+    >>> results = search_swot_data(aoi)
+    >>> print(f"Found {len(results)} SWOT data granules")
+    Found 10 SWOT data granules
+
+    """
+    # Search for SWOT data granules intersecting the AOI
+    short_name = "SWOT_L2_HR_Raster_2.0" if dataset == "Raster_100" else "SWOT_L2_HR_PIXC_2.0"
+    search_results = earthaccess.search_data(
+        short_name=short_name,
+        bounding_box=aoi,
+        temporal=date_range,
+    )
+
+    # If raster dataset, filter for 100m or 250m resolution, according to the dataset descr.
+
+    if "Raster" in dataset:
+        res = dataset[-3:]
+        return list(filter(lambda x: f"{res}m" in x["meta"]["native-id"], search_results))
+
+    return search_results
+
+
 def swot_results_to_df(
     search_results: list[earthaccess.DataGranule],
     *,
@@ -124,7 +190,7 @@ def swot_results_to_df(
     >>> df = swot_results_to_df(results, drop_duplicates=True)
     >>> print(df.columns)
     Index(['cycle_id', 'pass_id', 'tile_id', 'date_str', 'tile_name', 'vers',
-           'datetime', 'date'], dtype='object')
+            'datetime', 'date'], dtype='object')
 
     """
     # Organize data in a dictionary
@@ -134,14 +200,17 @@ def swot_results_to_df(
 
         parts = _id.split("_")
 
+        # The short Id must have only parts that are longer than 1 character
+        short_id_parts = filter(lambda x: len(x) > 1, parts[:-3])
+
         data[_id] = {
-            "cycle_id": parts[4],
-            "pass_id": parts[5],
-            "tile_id": parts[6],
-            "date_str": parts[7],
-            "tile_name": parts[5] + "_" + parts[6],
-            "short_id": _id[:44],
-            "vers": parts[9],
+            "cycle_id": parts[-7],
+            "pass_id": parts[-6],
+            "tile_id": parts[-5],
+            "date_str": parts[-4],
+            "tile_name": parts[-6] + "_" + parts[-5],
+            "short_id": "_".join(short_id_parts),
+            "vers": parts[-2],
             "item": item,
         }
 
@@ -534,3 +603,91 @@ def download_mosaics(
         file_paths.append(file_path)
 
     return file_paths
+
+
+def get_swot_bbox(swot_item: earthaccess.DataGranule) -> BaseGeometry:
+    """Extract the bounding box of a SWOT item.
+
+    Uses the 'geometry' field from the SWOT item metadata to create a BaseGeometry object.
+
+    Args:
+        swot_item (earthaccess.DataGranule): The SWOT item to extract the bounding box from.
+
+    Returns:
+        BaseGeometry: The bounding box of the SWOT item.
+
+    """
+    geometry = cast(
+        "dict[str, list[dict[str, float]]]",
+        swot_item["umm"]["SpatialExtent"]["HorizontalSpatialDomain"]["Geometry"],
+    )
+    bounds = list(geometry["BoundingRectangles"][0].values())
+
+    # Create a bounding box from the coordinates
+    return box(*bounds)  # type: ignore[arg-type]
+
+
+def get_swot_footprint(swot_item: earthaccess.DataGranule) -> tuple[BaseGeometry, str]:
+    """Extract the footprint of a SWOT item.
+
+    For the footprint, we need to access the SWOT dataset, so we will use the
+    item, to open a connection to the file in the cloud.
+
+    Args:
+        swot_item (earthaccess.DataGranule): The SWOT item to extract the footprint from.
+
+    Returns:
+        BaseGeometry: The footprint of the SWOT item.
+
+    """
+    # Get the native-id of the swot item and check if the file with the footprint
+    # already exists in /data/swot/footprints
+    native_id = cast("str", swot_item["meta"]["native-id"])
+    parts = native_id.split("_")
+    tile_id = parts[-5]  # The tile_id is the 5th last part of the native-id
+
+    footprint_path = Path("/data/swot/footprints") / f"{tile_id}.parquet"
+    if footprint_path.exists():
+        # If the footprint file already exists, read it directly
+        geom = gpd.read_parquet(footprint_path).geometry.iloc[0]
+        return cast("BaseGeometry", geom), tile_id
+
+    # If the footprint file does not exist, we need to open the SWOT dataset
+    # and extract the footprint from the corner coordinates
+    # Open the SWOT item to get the dataset
+    # We will use the pqdm_kwargs to disable parallel processing and TQDM bar
+    files = earthaccess.open([swot_item], pqdm_kwargs={"disable": True})
+
+    ds = xr.open_dataset(files[0])  # type: ignore[]
+
+    # Create the footprint polygon using the corner coordinates
+    # Assuming the corners form a quadrilateral in this order.
+    # before start, check if the dataset has the required attributes`
+    if "outer_first_longitude" in ds.attrs:
+        footprint_coords = [
+            (ds.attrs["outer_first_longitude"], ds.attrs["outer_first_latitude"]),  # outer first
+            (ds.attrs["inner_first_longitude"], ds.attrs["inner_first_latitude"]),  # inner first
+            (ds.attrs["inner_last_longitude"], ds.attrs["inner_last_latitude"]),  # inner last
+            (ds.attrs["outer_last_longitude"], ds.attrs["outer_last_latitude"]),  # outer last
+            (ds.attrs["outer_first_longitude"], ds.attrs["outer_first_latitude"]),  # close polygon
+        ]
+    else:
+        footprint_coords = [
+            (ds.attrs["left_first_longitude"], ds.attrs["left_first_latitude"]),  # bottom-left
+            (ds.attrs["right_first_longitude"], ds.attrs["right_first_latitude"]),  # bottom-right
+            (ds.attrs["right_last_longitude"], ds.attrs["right_last_latitude"]),  # top-right
+            (ds.attrs["left_last_longitude"], ds.attrs["left_last_latitude"]),  # top-left
+            (ds.attrs["left_first_longitude"], ds.attrs["left_first_latitude"]),
+        ]
+
+    # Correct negative longitudes. Add 360 when longitude is negative
+    footprint_coords = [
+        (coords[0] if coords[0] > 0 else 360 + coords[0], coords[1]) for coords in footprint_coords
+    ]
+    footprint = Polygon(footprint_coords)
+
+    # Before returning, save the footprint to a file
+    footprint_gdf = gpd.GeoDataFrame(geometry=[footprint], crs="EPSG:4326")
+    footprint_gdf.to_parquet(footprint_path)
+
+    return Polygon(footprint_coords), tile_id

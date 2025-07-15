@@ -116,11 +116,59 @@ def match_swot_s2(
     aoi: BaseGeometry,
     max_days: int = 10,
 ) -> pd.DataFrame:
-    """Combine a swot dataframe and a s2 dataframe to find the closest S2 Images."""
+    """Match SWOT observations with closest Sentinel-2 images and assess cloud coverage.
+
+    This function combines SWOT satellite water surface height observations with
+    Sentinel-2 optical imagery by finding temporally close S2 images and evaluating
+    their cloud coverage quality. The result enables correlation analysis between
+    SWOT measurements and optical observations.
+
+    Parameters
+    ----------
+    swot_df : pd.DataFrame
+        DataFrame containing SWOT observations with required 'datetime' column.
+        Each row represents a SWOT observation at a specific time.
+    s2_df : pd.DataFrame
+        DataFrame containing Sentinel-2 imagery metadata with required 'datetime'
+        and 'item' columns. The 'item' column should contain STAC Item objects.
+    aoi : BaseGeometry
+        Area of Interest as a Shapely geometry object (e.g., Polygon, Point).
+        Used to spatially constrain the S2 image analysis for cloud assessment.
+    max_days : int, optional
+        Maximum temporal window in days to search for matching S2 images.
+        Default is 10 days (±10 days from each SWOT observation).
+
+    Returns
+    -------
+    pd.DataFrame
+        Multi-indexed DataFrame with columns:
+        - 'vers': SWOT data version
+        - 'datetime': Original observation datetime
+        - 'valid_pxls': Fraction of cloud-free pixels in S2 image (0-1)
+        - 'id': SWOT observation identifier
+        - 'id_s2': Sentinel-2 image identifier
+        - 'item': Original SWOT STAC item
+        - 'item_s2': Matched Sentinel-2 STAC item
+
+        Index levels are ('index', 'delta') where 'delta' is the time
+        difference between SWOT and S2 observations.
+
+    Notes
+    -----
+    This function performs cloud assessment by analyzing the Scene Classification
+    Layer (SCL) band of Sentinel-2 images. Pixels classified as vegetation (4),
+    not-vegetated (5), or water (6) are considered valid (cloud-free).
+
+    The processing can be time-intensive for large datasets as it downloads
+    and processes S2 imagery for cloud analysis.
+
+    """
+    # Initialize empty DataFrame to accumulate S2 statistics for all SWOT observations
     s2_stats_df = pd.DataFrame()
 
+    # Process each SWOT observation individually
     for row in tqdm(swot_df.itertuples(), total=len(swot_df)):
-
+        # Find closest S2 images and assess their cloud coverage
         closest_s2 = assess_s2_clouds(
             ref_time=cast("Timestamp", row.datetime),
             s2df=s2_df,
@@ -128,16 +176,25 @@ def match_swot_s2(
             max_days=max_days,
         )
 
+        # Prepare S2 results for joining with SWOT data
+        # Set index name to 'id' for proper joining
         closest_s2.index.name = "id"
+        # Add reference to the corresponding SWOT observation datetime
         closest_s2["index"] = row.datetime
+        # Restructure index to use SWOT datetime as primary index
         closest_s2 = closest_s2.reset_index()
         closest_s2 = closest_s2.set_index("index", drop=True)
 
+        # Accumulate results from all SWOT observations
         s2_stats_df = pd.concat([s2_stats_df, closest_s2], axis=0)
 
+    # Join SWOT observations with their matched S2 statistics
     joined = swot_df.join(s2_stats_df, rsuffix="_s2")
+
+    # Create multi-level index with original index and time delta for easy sorting/filtering
     swot_s2 = joined.reset_index().set_index(["index", "delta"])
 
+    # Select only the most relevant columns for the final output
     columns = ["vers", "datetime", "valid_pxls", "id", "id_s2", "item", "item_s2"]
 
     return swot_s2[columns]

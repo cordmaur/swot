@@ -5,14 +5,9 @@
 	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
 	"image": "cordmaur/planetary:v4",
 	"mounts": [
-		// if running iMac
-		// "source=/Users/cordmaur/Library/CloudStorage/OneDrive-AgeÌ‚nciaNacionaldeAÌguas/Trabalho/SOE/COVEC/Bases,target=/workspaces/bases,type=bind",
-		// "source=/Users/cordmaur/Projects/,target=/Projects,type=bind",
-		// "source=/Users/cordmaur/Library/CloudStorage/OneDrive-AgeÌ‚nciaNacionaldeAÌguas/Trabalho/SOE/COVEC/RelatoriosChuva/reports_folder,target=/workspaces/reports_folder,type=bind",
-		// if running Windows
-		"source=D:/OneDrive/data,target=/data,type=bind",
-		"source=D:/projects/Waterdetect,target=/workspaces/waterdetect,type=bind",
-		// "source=D:/OneDrive/Trabalho/SOE/COVEC/RelatoriosChuva/reports_folder,target=/workspaces/reports_folder,type=bind"
+		// if running Local Windows
+		// "source=D:/OneDrive/data,target=/data,type=bind",
+		"source=${localEnv:VULNERABILITY_FOLDER},target=/data,type=bind",
 	],
 	"runArgs": [
 		"--memory=50g",
@@ -26,12 +21,10 @@
 				"ms-toolsai.jupyter",
 				"ms-azuretools.vscode-docker",
 				"ms-toolsai.vscode-jupyter-cell-tags",
-				"ms-python.pylint",
 				"ms-python.vscode-pylance",
-				"ms-python.black-formatter",
+				"charliermarsh.ruff",
 				"njpwerner.autodocstring",
-				"amazonwebservices.aws-toolkit-vscode",
-				"ms-toolsai.jupyter"
+				"tamasfe.even-better-toml"
 			]
 		}
 	},

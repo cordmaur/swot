@@ -2,16 +2,21 @@
 
 from datetime import datetime
 from functools import cache
-from typing import TypeAlias, cast
+from typing import TYPE_CHECKING, TypeAlias, cast
 
 import earthaccess
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import rioxarray as xrio
-import xarray as xr
+from matplotlib.colors import BoundaryNorm, ListedColormap
 from pandas import Timestamp
 from shapely.geometry.base import BaseGeometry
 from tqdm.auto import tqdm
+
+if TYPE_CHECKING:
+    import xarray as xr
+    from matplotlib.axes import Axes
 
 DateLike: TypeAlias = datetime | Timestamp | str
 
@@ -24,6 +29,50 @@ LAYER_CLASSES = {
     254: "Ocean",
     255: "No data",
 }
+
+# Color mapping for visualization
+OPERA_COLOR_MAP = {
+    0: "#ffffff",  # Not Water (Land)
+    1: "#0000ff",  # Open Water
+    2: "#00ff00",  # Partial Surface Water
+    252: "#00ffff",  # Snow/Ice
+    253: "#7f7f7f",  # Clouds/Cloud Shadow
+    254: "#0000ff",  # Ocean (same as open water)
+    255: "#000000",  # No data
+}
+
+OPERA_LABELS = {
+    0: "Not Water",
+    1: "Open Water",
+    2: "Partial Surface Water",
+    252: "Snow/Ice",
+    253: "Clouds/Cloud Shadow",
+    254: "Ocean",
+    255: "No data",
+}
+
+
+def open_opera_mask(
+    item: earthaccess.DataGranule,
+) -> xr.DataArray:
+    # First, let's get the URL for the files corresponding to this item
+    # Use the EarthAccess API to get the files for the given item
+    # This will return a list of EarthAccessFile objects
+    # We cast it to a list of EarthAccessFile for type hinting
+    # and to avoid issues with type checking
+    url_files = cast(
+        "list[earthaccess.store.EarthAccessFile]",
+        earthaccess.open([item], pqdm_kwargs={"disable": True}),
+    )
+
+    # To asses the statistics, we will use the first file (WTF) - Band B01
+    wtr = [file for file in url_files if "B01" in file.info()["name"]]
+
+    if len(wtr) == 0:
+        msg = f"No WTR file found for {item['meta']['native-id']}"
+        raise ValueError(msg)
+
+    return cast("xr.DataArray", xrio.open_rasterio(wtr[0], masked=False))
 
 
 def search_opera(
@@ -141,24 +190,8 @@ def calc_aoi_stats(
         relevant item is found.
 
     """
-    # First, let's get the URL for the files corresponding to this item
-    # Use the EarthAccess API to get the files for the given item
-    # This will return a list of EarthAccessFile objects
-    # We cast it to a list of EarthAccessFile for type hinting
-    # and to avoid issues with type checking
-    url_files = cast(
-        "list[earthaccess.store.EarthAccessFile]",
-        earthaccess.open([opera_item], pqdm_kwargs={"disable": True}),
-    )
-
-    # To asses the statistics, we will use the first file (WTF) - Band B01
-    wtr = [file for file in url_files if "B01" in file.info()["name"]]
-
-    if len(wtr) == 0:
-        msg = f"No WTR file found for {opera_item['meta']['native-id']}"
-        raise ValueError(msg)
-
-    array = cast("xr.DataArray", xrio.open_rasterio(wtr[0], masked=False))
+    # First, open the array
+    array = open_opera_mask(opera_item)
 
     # Clip the array to the AOI
     if use_bounds:
@@ -181,3 +214,69 @@ def calc_aoi_stats(
     stats.update(stats_perc)
 
     return stats
+
+
+def plot_opera_array(
+    array: xr.DataArray,
+    ax: Axes | None = None,
+    *,
+    down_factor: int = 2,
+    add_colorbar: bool = True,
+) -> Axes:
+    """Plot an OPERA array with the proper color scheme matching hvplot visualization.
+
+    Parameters
+    ----------
+    array : xr.DataArray
+        The OPERA array to plot.
+    ax : matplotlib.axes.Axes, optional
+        The matplotlib axes to plot on. If None, a new figure and axes will be created.
+    title : str, optional
+        The title of the plot. Defaults to "B01 WTR".
+    add_colorbar : bool, optional
+        Whether to add a colorbar to the plot. Defaults to True.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+        The matplotlib axes with the plot.
+
+    """
+    # If no axes are provided, create a new figure and axes
+    if ax is None:
+        _, ax = plt.subplots(figsize=(10, 10))
+
+    # Get the possible values of OPERA WTR
+    values = list(OPERA_COLOR_MAP.keys())
+
+    # Create the boundaries to place the ticks in the colormap correctly
+    # PS: If we have 7 colors, we need 8 boundaries
+    boundaries = [*values, max(values) + 1]
+
+    # Create a normalization function based on these boundaries
+    # This normalization function returns the index of the color based
+    # on the boundaries.
+    norm = BoundaryNorm(boundaries, len(OPERA_COLOR_MAP))
+
+    # Create the custom colormap
+    custom_cmap = ListedColormap(OPERA_COLOR_MAP.values())  # type: ignore[]
+
+    # Downscale the array by a factor
+    array = array.squeeze().sel(x=slice(None, None, down_factor), y=slice(None, None, down_factor))
+
+    # Plot the image and get the mappable
+    img = array.plot.imshow(ax=ax, cmap=custom_cmap, norm=norm, add_colorbar=False)
+
+    # If demanded, take care of the colorbar
+    if add_colorbar:
+        # Calculate the position of the colorbar ticks
+        ticks_positions = [
+            (boundaries[idx] + boundaries[idx + 1]) / 2 for idx in range(len(values))
+        ]
+
+        # Create the colorbar
+        cbar = ax.figure.colorbar(img, ax=ax, ticks=ticks_positions)
+        cbar.set_ticks(ticks=ticks_positions, labels=list(OPERA_LABELS.values()))
+        cbar.ax.tick_params(size=0)
+
+    return ax
