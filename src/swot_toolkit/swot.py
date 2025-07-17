@@ -88,6 +88,7 @@ def search_swot_data(
     date_range: tuple[str, str] | None = None,
     *,
     dataset: SWOT_DATASET = "Pixel Cloud",
+    footprint_filter: bool = False,
 ) -> list[earthaccess.DataGranule]:
     """Search for SWOT data granules within a specified area of interest (AOI).
 
@@ -108,6 +109,11 @@ def search_swot_data(
         The type of SWOT dataset to search for. Options are:
         - "Pixel Cloud": Search for pixel cloud data granules
         - "Raster_100": Search for raster (100m) data granules
+
+    footprint_filter : bool, default True
+        If True, applies a footprint filter to the search results to ensure that only granules
+        that intersect with the AOI are returned. If False, all granules matching the dataset
+        and date range are returned regardless of their intersection with the AOI.
 
     Returns
     -------
@@ -130,19 +136,23 @@ def search_swot_data(
     """
     # Search for SWOT data granules intersecting the AOI
     short_name = "SWOT_L2_HR_Raster_2.0" if dataset == "Raster_100" else "SWOT_L2_HR_PIXC_2.0"
-    search_results = earthaccess.search_data(
+    results = earthaccess.search_data(
         short_name=short_name,
-        bounding_box=aoi,
+        bounding_box=aoi.bounds,
         temporal=date_range,
     )
 
     # If raster dataset, filter for 100m or 250m resolution, according to the dataset descr.
-
     if "Raster" in dataset:
         res = dataset[-3:]
-        return list(filter(lambda x: f"{res}m" in x["meta"]["native-id"], search_results))
+        results = list(filter(lambda x: f"{res}m" in x["meta"]["native-id"], results))
 
-    return search_results
+    # If footprint_filter, filter results by intersection with AOI
+    if footprint_filter:
+        filtered = filter(lambda x: get_swot_footprint(x)[0].intersects(aoi), results)
+        results = list(filtered)
+
+    return results
 
 
 def swot_results_to_df(
@@ -680,10 +690,14 @@ def get_swot_footprint(swot_item: earthaccess.DataGranule) -> tuple[BaseGeometry
             (ds.attrs["left_first_longitude"], ds.attrs["left_first_latitude"]),
         ]
 
-    # Correct negative longitudes. Add 360 when longitude is negative
-    footprint_coords = [
-        (coords[0] if coords[0] > 0 else 360 + coords[0], coords[1]) for coords in footprint_coords
-    ]
+    # Check if footprint_coords has coordinates with different signs
+    if any(coord[0] < 0 for coord in footprint_coords) and any(
+        coord[0] >= 0 for coord in footprint_coords
+    ):
+        footprint_coords = [
+            (lon + 360, lat) if lon < 0 else (lon, lat) for lon, lat in footprint_coords
+        ]
+
     footprint = Polygon(footprint_coords)
 
     # Before returning, save the footprint to a file
