@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal, cast
 import earthaccess
 import geopandas as gpd
 import pandas as pd
+import rioxarray as xrio
 import xarray as xr
 from pandas import Timestamp
 from shapely.geometry import Polygon, box
@@ -427,7 +428,7 @@ def swot_to_geopandas(
     return gdf.set_crs("epsg:4326")
 
 
-def open_swot_file(
+def open_pixc_file(
     file: str | Path,
     additional_vars: None | list[str] = None,
     aoi: BaseGeometry | None = None,
@@ -510,7 +511,7 @@ def create_mosaic_df(
     return mosaic_df
 
 
-def create_mosaic(
+def create_pixc_mosaic(
     mosaic_df: pd.DataFrame,
     ref_date: str | Timestamp,
     aoi: BaseGeometry,
@@ -549,11 +550,15 @@ def create_mosaic(
 
     # Load and convert each item to GeoDataFrame
     items = cast("list[earthaccess.DataGranule]", mosaic_items["item"].to_list())
-    mosaic_files = earthaccess.download(items, local_path=local_path)
+    mosaic_files = earthaccess.download(
+        items,
+        local_path=local_path,
+        pqdm_kwargs={"disable": True},
+    )
 
     # Open the patches
     patches = [
-        open_swot_file(file, aoi=aoi, additional_vars=additional_vars) for file in mosaic_files
+        open_pixc_file(file, aoi=aoi, additional_vars=additional_vars) for file in mosaic_files
     ]
 
     # Concatenate all patches into one DataFrame
@@ -602,7 +607,7 @@ def download_mosaics(
             continue
 
         # Get the mosaic as a geodataframe
-        mosaic = create_mosaic(
+        mosaic = create_pixc_mosaic(
             mosaic_df,
             ref_date=date,
             aoi=aoi,
@@ -655,8 +660,9 @@ def get_swot_footprint(swot_item: earthaccess.DataGranule) -> tuple[BaseGeometry
     native_id = cast("str", swot_item["meta"]["native-id"])
     parts = native_id.split("_")
     tile_id = parts[-5]  # The tile_id is the 5th last part of the native-id
+    pass_id = parts[-6]  # The pass_id is the 6th last part of the native-id
 
-    footprint_path = Path("/data/swot/footprints") / f"{tile_id}.parquet"
+    footprint_path = Path("/data/swot/footprints") / f"{pass_id}_{tile_id}.parquet"
     if footprint_path.exists():
         # If the footprint file already exists, read it directly
         geom = gpd.read_parquet(footprint_path).geometry.iloc[0]
@@ -666,7 +672,11 @@ def get_swot_footprint(swot_item: earthaccess.DataGranule) -> tuple[BaseGeometry
     # and extract the footprint from the corner coordinates
     # Open the SWOT item to get the dataset
     # We will use the pqdm_kwargs to disable parallel processing and TQDM bar
-    files = earthaccess.open([swot_item], pqdm_kwargs={"disable": True})
+    files = earthaccess.download(
+        [swot_item],
+        local_path="/data/swot/downloads",
+        pqdm_kwargs={"disable": True},
+    )
 
     ds = xr.open_dataset(files[0])  # type: ignore[]
 
@@ -705,3 +715,82 @@ def get_swot_footprint(swot_item: earthaccess.DataGranule) -> tuple[BaseGeometry
     footprint_gdf.to_parquet(footprint_path)
 
     return Polygon(footprint_coords), tile_id
+
+
+def open_raster_file(
+    file: str | Path,
+    variable: str,
+    aoi: BaseGeometry | None = None,
+    crs: str = "epsg:4326",
+) -> xr.DataArray:
+    """Open SWOT file and clip it if necessary."""
+    # open the file
+    ds_raw = xrio.open_rasterio(file, mask_and_scale=True)[variable]  # type: ignore[]
+    ds = cast("xr.DataArray", ds_raw.rio.reproject(crs))  # type: ignore[]
+
+    if aoi is not None:
+        return ds.rio.clip(
+            [aoi],
+            crs=crs,
+            drop=True,
+            all_touched=True,
+        )  # type: ignore[]
+
+    return ds[variable]
+
+
+def create_raster_mosaic(
+    mosaic_df: pd.DataFrame,
+    ref_date: str | Timestamp,
+    aoi: BaseGeometry,
+    variable: str = "water_frac",
+    local_path: str = "/data/swot/downloads",
+) -> xr.DataArray:
+    """Create a mosaic GeoDataFrame from SWOT data around a reference date.
+
+    The mosaic_df already has the closest observations for each tile.
+
+    Parameters
+    ----------
+    mosaic_df : pd.DataFrame
+        DataFrame with SWOT RASTER metadata grouped by mosaic dates,
+        output from create_mosaic_df.
+    ref_date : str
+        Reference date to find closest observations for mosaic.
+    aoi : BaseGeometry
+        Area of interest for clipping the data.
+    variable :
+        The variable to extract from the raster data.
+        Default is "water_frac" for raster products.
+    local_path : str, default "/data/swot/downloads"
+        Local path to save the downloaded files.
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        GeoDataFrame with one row per tile, containing the closest observation
+        to the reference date for each tile.
+
+    """
+    # Find the closest items for mosaic creation
+    # Considering the mosaic_df has a 2-level index with mosaic_date and tile_name
+    # the ref_date must be in the first level and the result is a dataframe
+    mosaic_items = cast("pd.DataFrame", mosaic_df.loc[ref_date])
+
+    # Load and convert each item to GeoDataFrame
+    items = cast("list[earthaccess.DataGranule]", mosaic_items["item"].to_list())
+    mosaic_files = earthaccess.download(
+        items,
+        local_path=local_path,
+        pqdm_kwargs={"disable": True},
+    )
+
+    # Open the patches
+    patches = [open_raster_file(file, aoi=aoi, variable=variable) for file in mosaic_files]
+
+    # Assuming the first patch as reference, let's make the others match its shape
+    ref_patch = patches[0]
+    patches = [patch.rio.reproject_match(ref_patch) for patch in patches]
+
+    # Concatenate all patches into one DataFrame
+    return xr.concat(patches, dim="idx").squeeze()

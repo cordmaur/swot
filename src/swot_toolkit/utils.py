@@ -63,9 +63,13 @@ def _find_temporal_matches(
     ref_time: datetime | Timestamp | str,
     target_df: pd.DataFrame,
     target_date_col: str,
-    max_time_delta: timedelta,
+    max_time_delta: timedelta | int = 10,
 ) -> pd.DataFrame:
     """Find target observations within the specified time window."""
+    # Convert max_time_delta to timedelta if it's an integer (days)
+    if isinstance(max_time_delta, int):
+        max_time_delta = timedelta(days=max_time_delta)
+
     # Calculate time differences
     target_df_copy = target_df.copy()
     target_df_copy["delta"] = target_df_copy[target_date_col] - pd.to_datetime(ref_time)
@@ -255,7 +259,9 @@ def match_datasets_by_time(  # noqa: PLR0913
         matched_results = pd.concat([matched_results, best_match], axis=0)
 
     # Join reference data with matched target data
+    reference_df = reference_df.set_index(ref_date_col, drop=True)
+    reference_df.index.name = "index"
     joined = reference_df.join(matched_results, rsuffix="_target")
 
     # Create multi-level index with original index and time delta
-    return joined.reset_index().set_index(["index", "delta"])
+    return joined.reset_index().set_index(["index", "delta_target"])

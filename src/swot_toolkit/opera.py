@@ -2,21 +2,19 @@
 
 from datetime import datetime
 from functools import cache
-from typing import TYPE_CHECKING, TypeAlias, cast
+from typing import TypeAlias, cast
 
 import earthaccess
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import rioxarray as xrio
+import xarray as xr
+from matplotlib.axes import Axes
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from pandas import Timestamp
 from shapely.geometry.base import BaseGeometry
 from tqdm.auto import tqdm
-
-if TYPE_CHECKING:
-    import xarray as xr
-    from matplotlib.axes import Axes
 
 DateLike: TypeAlias = datetime | Timestamp | str
 
@@ -54,6 +52,8 @@ OPERA_LABELS = {
 
 def open_opera_mask(
     item: earthaccess.DataGranule,
+    aoi: BaseGeometry | None = None,
+    crs: str = "EPSG:4326",
 ) -> xr.DataArray:
     # First, let's get the URL for the files corresponding to this item
     # Use the EarthAccess API to get the files for the given item
@@ -72,7 +72,42 @@ def open_opera_mask(
         msg = f"No WTR file found for {item['meta']['native-id']}"
         raise ValueError(msg)
 
-    return cast("xr.DataArray", xrio.open_rasterio(wtr[0], masked=False))
+    array = cast("xr.DataArray", xrio.open_rasterio(wtr[0], masked=False))
+    array = array.rio.reproject(crs).squeeze()
+
+    if aoi is not None:
+        array = array.rio.clip([aoi], crs=crs, drop=True)
+
+    return array
+
+
+def open_opera_mask_from_datetime(
+    tile_id: str,
+    datetime_str: str,
+    aoi: BaseGeometry,
+) -> xr.DataArray:
+    """Open the OPERA mask for a given datetime string."""
+    # Search for the item using the datetime string
+    date_str = datetime_str[:8]
+    items = earthaccess.search_data(
+        short_name="OPERA_L3_DSWX-HLS_V1",
+        temporal=(date_str, date_str),
+        bounding_box=aoi.bounds,
+        granule_name="*" + tile_id + "*" + datetime_str + "*",
+    )
+
+    if not items:
+        msg = f"No OPERA data found for {datetime_str}"
+        raise ValueError(msg)
+
+    if len(items) > 1:
+        msg = f"Multiple OPERA items found for {datetime_str}. Please refine your search criteria."
+        raise ValueError(
+            msg,
+        )
+
+    # Open the first item found
+    return open_opera_mask(items[0], aoi=aoi)
 
 
 def search_opera(
