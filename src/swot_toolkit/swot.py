@@ -8,13 +8,19 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import earthaccess
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 import rioxarray as xrio
 import xarray as xr
 from pandas import Timestamp
+from pyproj import CRS, Transformer
+from rasterio.features import geometry_mask  # type: ignore  # noqa: PGH003
+from shapely import LineString
 from shapely.geometry import Polygon, box
 from shapely.geometry.base import BaseGeometry
+from shapely.ops import transform
 
+from .flags import select_pixels_by_quality
 from .utils import project_root
 
 if TYPE_CHECKING:
@@ -136,7 +142,7 @@ def search_swot_data(
 
     """
     # Search for SWOT data granules intersecting the AOI
-    short_name = "SWOT_L2_HR_Raster_2.0" if dataset == "Raster_100" else "SWOT_L2_HR_PIXC_2.0"
+    short_name = "SWOT_L2_HR_Raster_D" if dataset == "Raster_100" else "SWOT_L2_HR_PIXC_D"
     results = earthaccess.search_data(
         short_name=short_name,
         bounding_box=aoi.bounds,
@@ -642,6 +648,88 @@ def get_swot_bbox(swot_item: earthaccess.DataGranule) -> BaseGeometry:
     return box(*bounds)  # type: ignore[arg-type]
 
 
+def adjust_footprint_signs(
+    footprint_coords: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Adjust longitude coordinates in footprint to handle dateline crossing.
+
+    When footprint coordinates span the dateline (have both negative and positive longitudes),
+    this function adjusts negative longitudes by adding 360 degrees to ensure proper
+    polygon creation.
+
+    Args:
+        footprint_coords: List of (longitude, latitude) coordinate tuples.
+
+    Returns:
+        list[tuple[float, float]]: Adjusted coordinate list with consistent longitude signs.
+
+    """
+    # Check if footprint_coords has coordinates with different signs
+    if any(coord[0] < 0 for coord in footprint_coords) and any(
+        coord[0] >= 0 for coord in footprint_coords
+    ):
+        return [(lon + 360, lat) if lon < 0 else (lon, lat) for lon, lat in footprint_coords]
+    return footprint_coords
+
+
+def get_pixc_footprint(ds: xr.Dataset) -> BaseGeometry:
+    """Extract the footprint of a PIXC dataset.
+
+    Args:
+        ds (xr.Dataset): The PIXC dataset to extract the footprint from.
+
+    Returns:
+        BaseGeometry: The footprint geometry of the PIXC dataset.
+
+    """
+    footprint_coords = [
+        (ds.attrs["outer_first_longitude"], ds.attrs["outer_first_latitude"]),  # outer first
+        (ds.attrs["inner_first_longitude"], ds.attrs["inner_first_latitude"]),  # inner first
+        (ds.attrs["inner_last_longitude"], ds.attrs["inner_last_latitude"]),  # inner last
+        (ds.attrs["outer_last_longitude"], ds.attrs["outer_last_latitude"]),  # outer last
+        (ds.attrs["outer_first_longitude"], ds.attrs["outer_first_latitude"]),  # close polygon
+    ]
+
+    # Adjust coordinates for dateline crossing
+    footprint_coords = adjust_footprint_signs(footprint_coords)
+
+    return Polygon(footprint_coords)
+
+
+def get_raster_footprint(ds: xr.Dataset, crs: CRS | None = None) -> Polygon:
+    """Extract the footprint of a raster dataset.
+
+    Args:
+        ds (xr.Dataset): The raster dataset to extract the footprint from.
+        crs (str): The coordinate reference system of the dataset. Default is "EPSG:4326".
+
+    Returns:
+        BaseGeometry: The footprint geometry of the raster dataset.
+
+    """
+    footprint_coords = [
+        (ds.attrs["left_first_longitude"], ds.attrs["left_first_latitude"]),  # bottom-left
+        (ds.attrs["right_first_longitude"], ds.attrs["right_first_latitude"]),  # bottom-right
+        (ds.attrs["right_last_longitude"], ds.attrs["right_last_latitude"]),  # top-right
+        (ds.attrs["left_last_longitude"], ds.attrs["left_last_latitude"]),  # top-left
+        (ds.attrs["left_first_longitude"], ds.attrs["left_first_latitude"]),
+    ]
+
+    # Adjust coordinates for dateline crossing
+    footprint_coords = adjust_footprint_signs(footprint_coords)
+
+    # Create the polygon
+    footprint = Polygon(footprint_coords)
+
+    # If the CRS is not EPSG:4326, we need to reproject the footprint
+    if crs is not None:
+        footprint_gdf = gpd.GeoDataFrame(geometry=[footprint], crs="epsg:4326")
+        footprint_gdf = footprint_gdf.to_crs(crs)
+        footprint = cast("Polygon", footprint_gdf.geometry.iloc[0])
+
+    return footprint
+
+
 def get_swot_footprint(swot_item: earthaccess.DataGranule) -> tuple[BaseGeometry, str]:
     """Extract the footprint of a SWOT item.
 
@@ -682,69 +770,136 @@ def get_swot_footprint(swot_item: earthaccess.DataGranule) -> tuple[BaseGeometry
 
     # Create the footprint polygon using the corner coordinates
     # Assuming the corners form a quadrilateral in this order.
-    # before start, check if the dataset has the required attributes`
+    # before start, check if the dataset has the required attributes
     if "outer_first_longitude" in ds.attrs:
-        footprint_coords = [
-            (ds.attrs["outer_first_longitude"], ds.attrs["outer_first_latitude"]),  # outer first
-            (ds.attrs["inner_first_longitude"], ds.attrs["inner_first_latitude"]),  # inner first
-            (ds.attrs["inner_last_longitude"], ds.attrs["inner_last_latitude"]),  # inner last
-            (ds.attrs["outer_last_longitude"], ds.attrs["outer_last_latitude"]),  # outer last
-            (ds.attrs["outer_first_longitude"], ds.attrs["outer_first_latitude"]),  # close polygon
-        ]
+        footprint = get_pixc_footprint(ds)
     else:
-        footprint_coords = [
-            (ds.attrs["left_first_longitude"], ds.attrs["left_first_latitude"]),  # bottom-left
-            (ds.attrs["right_first_longitude"], ds.attrs["right_first_latitude"]),  # bottom-right
-            (ds.attrs["right_last_longitude"], ds.attrs["right_last_latitude"]),  # top-right
-            (ds.attrs["left_last_longitude"], ds.attrs["left_last_latitude"]),  # top-left
-            (ds.attrs["left_first_longitude"], ds.attrs["left_first_latitude"]),
-        ]
-
-    # Check if footprint_coords has coordinates with different signs
-    if any(coord[0] < 0 for coord in footprint_coords) and any(
-        coord[0] >= 0 for coord in footprint_coords
-    ):
-        footprint_coords = [
-            (lon + 360, lat) if lon < 0 else (lon, lat) for lon, lat in footprint_coords
-        ]
-
-    footprint = Polygon(footprint_coords)
+        footprint = get_raster_footprint(ds)
 
     # Before returning, save the footprint to a file
     footprint_gdf = gpd.GeoDataFrame(geometry=[footprint], crs="EPSG:4326")
     footprint_gdf.to_parquet(footprint_path)
 
-    return Polygon(footprint_coords), tile_id
+    return footprint, tile_id
+
+
+def get_nadir_from_footprint(footprint: Polygon) -> LineString:
+    """Extract the nadir line from a given footprint polygon in an xarray Dataset.
+
+    The function assumes that the dataset contains a footprint polygon (footprint_proj)
+    and computes the nadir line by:
+      - Finding the centroid of the footprint.
+      - Separating the exterior coordinates into points above and below the centroid latitude.
+      - Averaging the two uppermost and two lowermost points to define the endpoints of the nadir line.
+
+    Args:
+        footprint: A shapely Polygon representing the footprint.
+
+    Returns:
+        LineString: A shapely LineString representing the nadir line between the averaged upper and lower points.
+
+    """
+    # We need to separate the two uppermost and the two lowermost points
+    # So, first we get the centroid of the footprint
+    centroid = footprint.centroid
+
+    # Then we separate the points above and below the centroid latitude
+    # First get all points as a list
+    pts = list(footprint.exterior.coords)
+
+    # Before separating the points, we need to remove the last point, which is a duplicate of the first point
+    pts = pts[:-1]
+
+    # Now we can separate the points
+    upper_points = [pt for pt in pts if pt[1] > centroid.y]
+    lower_points = [pt for pt in pts if pt[1] < centroid.y]
+
+    # Convert points to numpy arrays for easier manipulation and readability
+    upper_points_np = np.array(upper_points)
+    lower_points_np = np.array(lower_points)
+
+    # With the upper and lower points, we can find the nadir line
+    # For that, we need to find the mean between the two upper points and the two lower points
+    upper_nadir = upper_points_np.mean(axis=0)
+    lower_nadir = lower_points_np.mean(axis=0)
+
+    return LineString([upper_nadir, lower_nadir])
+
+
+def get_nadir_from_raster(ds: xr.Dataset, crs: CRS | None = None) -> LineString:
+    """Extract the nadir line from a given raster dataset.
+
+    The function assumes that the dataset contains a footprint polygon (footprint_proj)
+    and computes the nadir line by:
+      - Finding the centroid of the footprint.
+      - Separating the exterior coordinates into points above and below the centroid latitude.
+      - Averaging the two uppermost and two lowermost points to define the endpoints of the nadir line.
+
+    Args:
+        ds: An xarray Dataset containing the footprint polygon.
+        crs: The coordinate reference system of the dataset. Default is "EPSG:4326".
+
+    Returns:
+        LineString: A shapely LineString representing the nadir line between the averaged upper and lower points.
+
+    """
+    footprint = get_raster_footprint(ds, crs=crs)
+    return get_nadir_from_footprint(footprint)
 
 
 def open_raster_file(
     file: str | Path,
-    variable: str,
+    variables: list[str],
     aoi: BaseGeometry | None = None,
-    crs: str = "epsg:4326",
-) -> xr.DataArray:
+    *,
+    exclude_no_data: bool = False,
+) -> xr.Dataset:
     """Open SWOT file and clip it if necessary."""
     # open the file
-    ds_raw = xrio.open_rasterio(file, mask_and_scale=True)[variable]  # type: ignore[]
-    ds = cast("xr.DataArray", ds_raw.rio.reproject(crs))  # type: ignore[]
+    ds = xrio.open_rasterio(file, mask_and_scale=True)[variables]  # type: ignore[]
+    ds = cast("xr.Dataset", ds.squeeze())
+    crs = ds.rio.crs
+
+    if exclude_no_data:
+        # Create a mask around nadir to remove near swath pixels
+        nadir = get_nadir_from_raster(ds, crs)
+        inner_swath = nadir.buffer(10000, cap_style="flat")
+        nadir_mask = cast(
+            "np.ndarray",
+            geometry_mask(
+                geometries=[inner_swath],
+                out_shape=ds[variables[0]].shape,
+                transform=ds[variables[0]].rio.transform(),
+                invert=True,
+            ),
+        )
+        ds = ds.where(~nadir_mask)
+        ds = ds.rio.write_crs(crs)
 
     if aoi is not None:
+        # we need to project the AOI to the dataset CRS
+        transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+        aoi_proj = transform(transformer.transform, aoi)
+
         return ds.rio.clip(
-            [aoi],
+            [aoi_proj],
             crs=crs,
             drop=True,
             all_touched=True,
         )  # type: ignore[]
 
-    return ds[variable]
+    return ds
 
 
-def create_raster_mosaic(
+def create_raster_mosaic(  # noqa: PLR0913
     mosaic_df: pd.DataFrame,
     ref_date: str | Timestamp,
     aoi: BaseGeometry,
     variable: str = "water_frac",
     local_path: str = "/data/swot/downloads",
+    exclude_flags: list[str] | None = None,
+    *,
+    exclude_no_data: bool = False,
 ) -> xr.DataArray:
     """Create a mosaic GeoDataFrame from SWOT data around a reference date.
 
@@ -764,6 +919,10 @@ def create_raster_mosaic(
         Default is "water_frac" for raster products.
     local_path : str, default "/data/swot/downloads"
         Local path to save the downloaded files.
+    exclude_flags :
+        List of quality flags to exclude from the mosaic. If None, a default set is used.
+    exclude_no_data :
+        Whether to exclude no-data pixels from the mosaic. Default is False.
 
     Returns
     -------
@@ -777,7 +936,6 @@ def create_raster_mosaic(
     # the ref_date must be in the first level and the result is a dataframe
     mosaic_items = cast("pd.DataFrame", mosaic_df.loc[ref_date])
 
-    # Load and convert each item to GeoDataFrame
     items = cast("list[earthaccess.DataGranule]", mosaic_items["item"].to_list())
     mosaic_files = earthaccess.download(
         items,
@@ -786,11 +944,33 @@ def create_raster_mosaic(
     )
 
     # Open the patches
-    patches = [open_raster_file(file, aoi=aoi, variable=variable) for file in mosaic_files]
+    # include the quality flag in the variables list
+    variables = [variable, "water_area_qual_bitwise"]
+    patches = [
+        open_raster_file(file, aoi=aoi, variables=variables, exclude_no_data=exclude_no_data)
+        for file in mosaic_files
+    ]
 
     # Assuming the first patch as reference, let's make the others match its shape
     ref_patch = patches[0]
-    patches = [patch.rio.reproject_match(ref_patch) for patch in patches]
+    patches = [patch.rio.reproject_match(ref_patch).squeeze() for patch in patches]
+
+    masks = []
+    for i, patch in enumerate(patches):
+        # Initialize with an empty negative mask
+        mask = np.zeros(patch[variable].shape, dtype=bool)
+
+        if exclude_no_data:
+            patches[i] = patch.where(~mask)
+            masks.append(patches[i])
+
+    # Apply quality flag filtering to each patch
+    # exclude_flags = [] if exclude_flags is None else exclude_flags
+
+    # Get the masks based on the flags
+    # masks = [select_pixels_by_quality(patch, include_flags=exclude_flags)[1] for patch in patches]
+
+    # patches = [patch.where(~mask) for patch, mask in zip(patches, masks, strict=True)]
 
     # Concatenate all patches into one DataFrame
-    return xr.concat(patches, dim="idx").squeeze()
+    return xr.concat(patches, dim="idx").squeeze(), masks
