@@ -50,7 +50,7 @@ def mask_by_flags(
         # Get the bit position for the flag name
         bit = QUALITY_FLAGS.get(flag_name)
         if bit is not None:
-            mask |= (flag_array.astype("int") & (1 << bit)).astype(bool)
+            mask |= (flag_array.fillna(0).astype("int") & (1 << bit)).astype(bool)
 
     return mask
 

@@ -11,7 +11,7 @@ from shapely.geometry.base import BaseGeometry
 def read_kml_geometry(
     kml_path: str | Path,
     feature_index: int = 0,
-) -> list[BaseGeometry] | None:
+) -> list[BaseGeometry]:
     """Read a KML file and return a Shapely geometry.
 
     Parameters
@@ -66,4 +66,5 @@ def read_kml_geometry(
             if hasattr(ft, "geometry") and getattr(ft, "geometry", None) is not None
         ]
 
-    return None
+    msg = "No valid geometry found in the KML file."
+    raise ValueError(msg)

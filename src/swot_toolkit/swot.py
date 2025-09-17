@@ -20,7 +20,7 @@ from shapely.geometry import Polygon, box
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform
 
-from .flags import select_pixels_by_quality
+from .flags import mask_by_flags
 from .utils import project_root
 
 if TYPE_CHECKING:
@@ -149,6 +149,14 @@ def search_swot_data(
         temporal=date_range,
     )
 
+    # Concatenate the results with a search on the old short name for the data
+    short_name = short_name.replace("_D", "_2.0")
+    results += earthaccess.search_data(
+        short_name=short_name,
+        bounding_box=aoi.bounds,
+        temporal=date_range,
+    )
+
     # If raster dataset, filter for 100m or 250m resolution, according to the dataset descr.
     if "Raster" in dataset:
         res = dataset[-3:]
@@ -227,7 +235,7 @@ def swot_results_to_df(
             "date_str": parts[-4],
             "tile_name": parts[-6] + "_" + parts[-5],
             "short_id": "_".join(short_id_parts),
-            "vers": parts[-2],
+            "vers": parts[-2] + "_" + parts[-1].split(".")[0],
             "item": item,
         }
 
@@ -858,7 +866,12 @@ def open_raster_file(
     # open the file
     ds = xrio.open_rasterio(file, mask_and_scale=True)[variables]  # type: ignore[]
     ds = cast("xr.Dataset", ds.squeeze())
+
+    # Get the CRS of the dataset
     crs = ds.rio.crs
+
+    # The "land" pixels come with NaN values, so we will fill them with 0
+    ds = ds.fillna(0)
 
     if exclude_no_data:
         # Create a mask around nadir to remove near swath pixels
@@ -874,7 +887,9 @@ def open_raster_file(
             ),
         )
         ds = ds.where(~nadir_mask)
-        ds = ds.rio.write_crs(crs)
+
+    # Ensure the dataset has a CRS assigned
+    ds = ds.rio.write_crs(crs)
 
     if aoi is not None:
         # we need to project the AOI to the dataset CRS
@@ -955,22 +970,30 @@ def create_raster_mosaic(  # noqa: PLR0913
     ref_patch = patches[0]
     patches = [patch.rio.reproject_match(ref_patch).squeeze() for patch in patches]
 
+    # Apply quality flag filtering to each patch
+    exclude_flags = [] if exclude_flags is None else exclude_flags
+
     masks = []
     for i, patch in enumerate(patches):
-        # Initialize with an empty negative mask
-        mask = np.zeros(patch[variable].shape, dtype=bool)
-
+        # Apply quality flag filtering to each patch
         if exclude_no_data:
-            patches[i] = patch.where(~mask)
-            masks.append(patches[i])
+            # Create a mask for no-data values
+            no_data_mask = mask_by_flags(
+                patch["water_area_qual_bitwise"],
+                flags=["outside_scene_bounds", "outside_data_window"],
+            )
+            patch = patch.where(~no_data_mask)
 
-    # Apply quality flag filtering to each patch
-    # exclude_flags = [] if exclude_flags is None else exclude_flags
+            masks.append(no_data_mask)
 
-    # Get the masks based on the flags
-    # masks = [select_pixels_by_quality(patch, include_flags=exclude_flags)[1] for patch in patches]
+        # Now let's treat the quality flags
+        quality_mask = mask_by_flags(patch["water_area_qual_bitwise"], exclude_flags)
 
-    # patches = [patch.where(~mask) for patch, mask in zip(patches, masks, strict=True)]
+        # The pixels that do not pass the quality mask will be set to -1 (non-observed data)
+        patches[i] = patch.where(~quality_mask, other=-1).clip(max=1)
 
+        # masks.append(quality_mask)
+
+    return patches, masks
     # Concatenate all patches into one DataFrame
     return xr.concat(patches, dim="idx").squeeze(), masks

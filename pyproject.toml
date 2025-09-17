@@ -56,7 +56,7 @@ packages = ["src/swot_toolkit"]
 [tool.ruff]
 # Enable all checks by default
 select = ["ALL"]
-ignore = ["EXE002"]
+ignore = ["EXE002", "T201"]
 
 line-length = 99
 

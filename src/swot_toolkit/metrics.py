@@ -53,6 +53,15 @@ def calc_metrics(ref_mask: xr.DataArray, pred_mask: xr.DataArray) -> dict[str, f
     coverage = (pred_mask_valid != 3).sum() / (~no_data_mask).sum()  # noqa: PLR2004
     coverage = float(coverage)
 
+    # Water coverage: percentage of water pixels (in reference) that are not non-observed
+    # in comparison to the valid water pixels
+    ref_water_mask = ref_mask_valid == 1
+    if ref_water_mask.sum() > 0:
+        water_coverage = (pred_mask_valid[ref_water_mask] != 3).sum() / ref_water_mask.sum()
+        water_coverage = float(water_coverage)
+    else:
+        water_coverage = np.nan
+
     # Now we create the confusion matrix
     cm = confusion_matrix(
         ref_mask_valid,
@@ -65,9 +74,9 @@ def calc_metrics(ref_mask: xr.DataArray, pred_mask: xr.DataArray) -> dict[str, f
 
     # Calculate metrics using scikit
     accuracy = accuracy_score(ref_mask_valid, pred_mask_valid)
-    precision = precision_score(ref_mask_valid, pred_mask_valid, labels=[0, 1])
-    recall = recall_score(ref_mask_valid, pred_mask_valid, labels=[0, 1])
-    f1 = f1_score(ref_mask_valid, pred_mask_valid, labels=[0, 1])
+    precision = precision_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted")
+    recall = recall_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted")
+    f1 = f1_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted")
     kappa = cohen_kappa_score(ref_mask_valid, pred_mask_valid, labels=[0, 1])
 
     # Return all metrics
@@ -78,4 +87,15 @@ def calc_metrics(ref_mask: xr.DataArray, pred_mask: xr.DataArray) -> dict[str, f
         "f1": float(f1),
         "kappa": kappa,
         "coverage": coverage,
+        "water_coverage": water_coverage,
+        "TP": int(tp),
+        "FP": int(fp),
+        "TN": int(tn),
+        "FN": int(fn),
+        "total_valid": int((~no_data_mask).sum()),
+        "total_no_data": int(no_data_mask.sum()),
+        "total_pixels": int(ref_mask_np.size),
+        "total_non_observed": int((pred_mask_np == 3).sum()),  # noqa: PLR2004
+        # "ref_mask": ref_mask_valid,
+        # "pred_mask": pred_mask_valid,
     }

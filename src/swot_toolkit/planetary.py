@@ -15,13 +15,80 @@ from tqdm.auto import tqdm
 catalog = pystac_client.Client.open("https://planetarycomputer.microsoft.com/api/stac/v1")
 
 
+def guess_best_s2_tile(aoi: BaseGeometry) -> str | None:
+    """Find the Sentinel-2 tile with minimum null values for a given area of interest.
+
+    This function searches for Sentinel-2 L2A imagery within a specified time range
+    and geographic area, then evaluates each available tile to determine which has
+    the fewest null values in the Scene Classification Layer (SCL) band. This helps
+    identify the optimal tile for analysis by minimizing data gaps.
+
+    Parameters
+    ----------
+    aoi : BaseGeometry
+        Area of Interest as a Shapely geometry object (e.g., Polygon, Point).
+        Used to spatially constrain the Sentinel-2 image search.
+
+    Returns
+    -------
+    str | None
+        The MGRS tile identifier (e.g., "33TWN") of the tile with the minimum
+        number of null values in the SCL band. Returns None if no tiles are found
+        or if an error occurs during processing.
+
+    Notes
+    -----
+    This function performs the following steps:
+    1. Searches the Planetary Computer STAC catalog for Sentinel-2 L2A imagery
+       between 2024-01-01 and 2024-02-15 that intersects the AOI
+    2. Loads the SCL band for each unique tile at 20m resolution
+    3. Counts null values in each tile
+    4. Returns the tile identifier with the minimum null count
+
+    The function uses a fixed date range and may need adjustment for different
+    time periods. Processing time scales with the number of tiles found.
+
+    """
+    # Search the STAC Catalog
+    search = catalog.search(
+        collections=["sentinel-2-l2a"],
+        intersects=aoi,
+        datetime=("2024-01-01", "2024-02-15"),
+    )
+
+    s2_df = s2_results_to_df(search.item_collection())
+    tiles = s2_df["tile"].unique()
+    s2_null_values: dict[str, int] = {}
+    for tile in tiles:
+        item = cast("Item", s2_df[s2_df["tile"] == tile]["item"].iloc[0])
+
+        cube = stac_load(
+            [pc.sign(item)],  # List of STAC items (can pass multiple)
+            bands=["SCL"],  # Bands to load
+            resolution=20,  # Output pixel size
+            bbox=aoi.bounds,
+        )
+
+        s2_null_values[tile] = cube["SCL"].isnull().sum().item()  # noqa: PD003
+
+        print(f"Tile {tile} has {s2_null_values[tile]} null values.")
+
+    # Return the tile with the least null values
+    return min(s2_null_values.keys(), key=lambda k: s2_null_values[k]) if s2_null_values else None
+
+
 def search_s2(
     aoi: BaseGeometry,
-    date_range: str,
+    date_range: tuple[str, str],
     s2_tile: str | None = None,
     rel_orbit: int | None = None,
 ) -> ItemCollection:
     """Search for Sentinel-2 imagery."""
+    # Check if s2_tile is informed. If not, will try to guess the best
+    if not s2_tile:
+        print("S2 tile not provided. Guessing the best tile...")
+        s2_tile = guess_best_s2_tile(aoi)
+
     # Construct a spatial query
     query: dict[str, dict[str, str | int]] = {"s2:mgrs_tile": {"eq": s2_tile}} if s2_tile else {}
 
@@ -108,6 +175,75 @@ def assess_s2_clouds(
         closest_s2.loc[idx, "valid_pxls"] = float(valid.count()) / float(valid.size)  # type: ignore[]
 
     return closest_s2
+
+
+def assess_s2_clouds_new(
+    s2df: pd.DataFrame,
+    aoi: BaseGeometry,
+) -> pd.DataFrame:
+    """Assess cloud coverage in all Sentinel-2 images within the dataframe.
+
+    This function evaluates the cloud coverage for each Sentinel-2 image in the
+    provided dataframe by analyzing the Scene Classification Layer (SCL) band.
+    It calculates the fraction of valid (cloud-free) pixels for each image,
+    adding this information as a new column to the dataframe.
+
+    Parameters
+    ----------
+    s2df : pd.DataFrame
+        DataFrame containing Sentinel-2 imagery metadata with required columns:
+        - 'item': STAC Item objects representing S2 images
+        Additional columns from the dataframe will be preserved.
+    aoi : BaseGeometry
+        Area of Interest as a Shapely geometry object (e.g., Polygon, Point).
+        Used to spatially constrain the S2 image analysis to the region of interest.
+        The bounds of this geometry determine the spatial extent for downloading
+        and processing the SCL band.
+
+    Returns
+    -------
+    pd.DataFrame
+        The input dataframe with an additional 'valid_pxls' column containing
+        the fraction of cloud-free pixels (float between 0 and 1) for each
+        Sentinel-2 image. A value of 1.0 indicates completely cloud-free,
+        while 0.0 indicates completely cloudy within the AOI.
+
+    Notes
+    -----
+    The cloud assessment uses the Sentinel-2 Scene Classification Layer (SCL)
+    band at 20m resolution. Pixels are considered valid (cloud-free) if they
+    are classified as:
+    - 4: Vegetation
+    - 5: Not-vegetated
+    - 6: Water
+
+    All other SCL values (including clouds, cloud shadows, snow, etc.) are
+    considered invalid. The function downloads the SCL band data for each
+    image, which may take time depending on the number of images and AOI size.
+
+    The function modifies the input dataframe in-place by adding the 'valid_pxls'
+    column.
+
+    """
+    # now, for each s2 img, check out for the clouds
+    for idx, row in tqdm(s2df.iterrows(), total=len(s2df)):  # type: ignore[]
+        # get the img
+        s2item = cast("Item", row["item"])
+        img = stac_load(
+            items=[s2item],
+            bands=["SCL"],
+            patch_url=pc.sign,
+            dtype="uint16",
+            nodata=0,
+            bbox=aoi.bounds,
+            resolution=20,
+        )["SCL"].squeeze()
+
+        valid = img.where((img >= 4) & (img <= 6))  # noqa: PLR2004
+
+        s2df.loc[idx, "valid_pxls"] = float(valid.count()) / float(valid.size)  # type: ignore[]
+
+    return s2df
 
 
 def match_swot_s2(

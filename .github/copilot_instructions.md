@@ -18,7 +18,19 @@ def process_swot_data(
     variables: List[str], 
     quality_threshold: Optional[float] = None
 ) -> xr.Dataset:
-    """Process SWOT dataset with specified variables."""
+    """Process SWOT dataset with specified variables.
+
+    Parameters:
+    -----------
+    dataset: Path to the output directory.
+    variables: List of SWOT variables to load into the dataset
+    quality_threshold: Number indicating the minimum quality to be accepcted. Optional 
+
+    Returns:
+    --------
+    Dataset with swot data loaded
+
+    """
     # Implementation here
     return processed_dataset
 ```
@@ -42,10 +54,16 @@ def process_swot_data(
 - Use double quotes for strings
 - Add docstrings to all public functions and classes using Google/NumPy style
 - Check for type annotations that can be rewritten based on PEP 604 syntax.
+- Avoid specifying long messages outside the exception classRuffTRY003
+
 
 ### Documentation
 - All public functions must have comprehensive docstrings
-- Include parameter types, descriptions, and return value documentation
+- Include parameters descriptions and return value documentation
+- Follow Numpydoc style. DO NOT ADD types in docstring, as they are already declared in the signature.
+- Multi-line docstring summary should start at the first line RuffD212
+- Dont forget to add blank line after last section of the docstring RuffD413
+
 - Add examples in docstrings when helpful
 - Use type hints instead of documenting types in docstrings
 - make sure the method has a return type
