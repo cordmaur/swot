@@ -3,9 +3,11 @@
 from datetime import datetime, timedelta
 from typing import cast
 
+import numpy as np
 import pandas as pd
 import planetary_computer as pc
 import pystac_client
+import xarray as xr
 from odc.stac import stac_load  # type: ignore[]
 from pandas import Timestamp
 from pystac import Item, ItemCollection
@@ -334,3 +336,64 @@ def match_swot_s2(
     columns = ["vers", "datetime", "valid_pxls", "id", "id_s2", "item", "item_s2"]
 
     return swot_s2[columns]
+
+
+def parse_s2_id(s2_id: str) -> dict[str, str | int | float]:
+    """Parse a Sentinel-2 ID into its components.
+
+    Parameters
+    ----------
+    s2_id : str
+        Sentinel-2 ID string to parse.
+
+    Returns
+    -------
+    dict[str, str | int | float]
+        Dictionary containing parsed components of the Sentinel-2 ID:
+        - 'mission': Mission identifier (e.g., 'S2A', 'S2B')
+        - 'product_level': Product level (e.g., 'L1C', 'L2A')
+        - 'sensing_date': Sensing date as a string (YYYYMMDDTHHMMSS)
+        - 'processing_date': Processing date as a string (YYYYMMDDTHHMMSS)
+        - 'relative_orbit': Relative orbit number (int)
+        - 'tile': MGRS tile identifier (str)
+
+    Raises
+    ------
+    ValueError
+        If the provided s2_id does not conform to the expected format.
+
+    Examples
+    --------
+    >>> parse_s2_id("S2A_MSIL2A_20240101T123456_N0509_R137_T33TWN_20240101T130000")
+    {
+        'mission': 'S2A',
+        'product_level': 'L2A',
+        'sensing_date': '20240101T123456',
+        'processing_date': '20240101T130000',
+        'relative_orbit': 137,
+        'tile': '33TWN',
+        'product_discriminator': 509,
+        'cloud_coverage': 0.0
+    }
+
+    """
+    parts = s2_id.split("_")
+    if len(parts) != 6:
+        raise ValueError(f"Invalid Sentinel-2 ID format: {s2_id}")
+
+    mission = parts[0]
+    product_level = parts[1][3:]  # Remove "MSI" prefix
+    sensing_date = parts[2]
+    relative_orbit = int(parts[3][1:])  # Remove "R" prefix and convert to int
+    tile = parts[4][1:]  # Remove "T" prefix
+    processing_date = parts[5]
+
+    return {
+        "mission": mission,
+        "product_level": product_level,
+        "sensing_date": sensing_date,
+        "processing_date": processing_date,
+        "relative_orbit": relative_orbit,
+        "tile": tile,
+        "date": sensing_date[:8],
+    }

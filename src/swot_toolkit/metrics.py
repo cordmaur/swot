@@ -8,12 +8,17 @@ from sklearn.metrics import (
     cohen_kappa_score,
     confusion_matrix,
     f1_score,
+    jaccard_score,
     precision_score,
     recall_score,
 )
 
 
-def calc_metrics(ref_mask: xr.DataArray, pred_mask: xr.DataArray) -> dict[str, float]:
+def calc_metrics(
+    ref_mask: xr.DataArray,
+    pred_mask: xr.DataArray,
+    metrics: list[str],
+) -> dict[str, float]:
     """Calculate metrics comparing reference and predicted masks.
 
     values for input masks:
@@ -70,32 +75,39 @@ def calc_metrics(ref_mask: xr.DataArray, pred_mask: xr.DataArray) -> dict[str, f
     )
 
     # Extract True Positives, False Positives, True Negatives, False Negatives
-    tn, fp, fn, tp = cm.ravel()
+    tn, fp, fn, tp = cm.ravel()  # type: ignore[]
 
+    results: dict[str, float] = {}
     # Calculate metrics using scikit
-    accuracy = accuracy_score(ref_mask_valid, pred_mask_valid)
-    precision = precision_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted")
-    recall = recall_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted")
-    f1 = f1_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted")
-    kappa = cohen_kappa_score(ref_mask_valid, pred_mask_valid, labels=[0, 1])
+    if "iou" in metrics:
+        iou = jaccard_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted")
+        results["iou"] = round(float(iou), 4)
 
-    # Return all metrics
-    return {
-        "accuracy": float(accuracy),
-        "precision": float(precision),
-        "recall": float(recall),
-        "f1": float(f1),
-        "kappa": kappa,
-        "coverage": coverage,
-        "water_coverage": water_coverage,
-        "TP": int(tp),
-        "FP": int(fp),
-        "TN": int(tn),
-        "FN": int(fn),
-        "total_valid": int((~no_data_mask).sum()),
-        "total_no_data": int(no_data_mask.sum()),
-        "total_pixels": int(ref_mask_np.size),
-        "total_non_observed": int((pred_mask_np == 3).sum()),  # noqa: PLR2004
-        # "ref_mask": ref_mask_valid,
-        # "pred_mask": pred_mask_valid,
-    }
+    if "f1" in metrics:
+        f1 = f1_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted")
+        results["f1"] = round(float(f1), 4)
+
+    if "accuracy" in metrics:
+        accuracy = accuracy_score(ref_mask_valid, pred_mask_valid)
+        results["accuracy"] = round(float(accuracy), 3)
+
+    if "precision" in metrics:
+        precision = precision_score(
+            ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted"
+        )
+        results["precision"] = round(float(precision), 4)
+    if "recall" in metrics:
+        recall = recall_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted")
+        results["recall"] = round(float(recall), 4)
+
+    if "kappa" in metrics:
+        kappa = cohen_kappa_score(ref_mask_valid, pred_mask_valid, labels=[0, 1])
+        results["kappa"] = round(float(kappa), 4)
+
+    if "coverage" in metrics:
+        results["coverage"] = round(float(coverage), 4)
+
+    if "water_coverage" in metrics:
+        results["water_coverage"] = round(float(water_coverage), 4)
+
+    return results

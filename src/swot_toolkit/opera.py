@@ -8,6 +8,7 @@ import earthaccess
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import rasterio as rio
 import rioxarray as xrio
 import xarray as xr
 from matplotlib.axes import Axes
@@ -53,7 +54,7 @@ OPERA_LABELS = {
 def open_opera_mask(
     item: earthaccess.DataGranule,
     aoi: BaseGeometry | None = None,
-    crs: str = "EPSG:4326",
+    crs: str | None = "EPSG:4326",
 ) -> xr.DataArray:
     # First, let's get the URL for the files corresponding to this item
     # Use the EarthAccess API to get the files for the given item
@@ -73,10 +74,20 @@ def open_opera_mask(
         raise ValueError(msg)
 
     array = cast("xr.DataArray", xrio.open_rasterio(wtr[0], masked=False))
-    array = array.rio.reproject(crs).squeeze()
 
+    # crs is informed, reproject the array, otherwise use the original crs
+    if crs is not None:
+        array = array.rio.reproject(crs).squeeze()
+    else:
+        crs = array.rio.crs
+
+    # If there is an AOI, clip the array to the AOI
     if aoi is not None:
-        array = array.rio.clip([aoi], crs=crs, drop=True)
+        # Normally aoi is given in EPSG:4326, so we need to reproject it to the array's crs
+        array = array.rio.clip_box(*aoi.bounds, crs="epsg:4326")
+
+    # Set the attributes for the array
+    array.attrs["native-id"] = item["meta"]["native-id"]
 
     return array
 
@@ -107,18 +118,22 @@ def open_opera_mask_from_datetime(
         )
 
     # Open the first item found
-    return open_opera_mask(items[0], aoi=aoi)
+    return open_opera_mask(items[0], aoi=aoi, crs=None)
 
 
 def search_opera(
     aoi: BaseGeometry,
     date_range: tuple[DateLike, DateLike],
+    granule_name: str | None = None,
 ) -> list[earthaccess.DataGranule]:
     """Search for OPERA masks in the given AOI and date range."""
+    granule = "" if granule_name is None else granule_name
+
     return earthaccess.search_data(
         short_name="OPERA_L3_DSWX-HLS_V1",
         temporal=(date_range[0], date_range[1]),
         bounding_box=aoi.bounds,
+        granule_name="*" + granule + "*",
     )
 
 
@@ -313,5 +328,7 @@ def plot_opera_array(
         cbar = ax.figure.colorbar(img, ax=ax, ticks=ticks_positions)
         cbar.set_ticks(ticks=ticks_positions, labels=list(OPERA_LABELS.values()))
         cbar.ax.tick_params(size=0)
+
+    ax.set_aspect("equal")
 
     return ax
