@@ -1,6 +1,6 @@
 """Methods to download/process OPERA masks."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import cache
 from typing import TypeAlias, cast
 
@@ -8,7 +8,6 @@ import earthaccess
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import rasterio as rio
 import rioxarray as xrio
 import xarray as xr
 from matplotlib.axes import Axes
@@ -332,3 +331,82 @@ def plot_opera_array(
     ax.set_aspect("equal")
 
     return ax
+
+
+######################################
+# OPERA-S1 functions
+######################################
+def search_opera_s1(aoi: BaseGeometry, date: str, delta: int = 15) -> pd.DataFrame | None:
+    """Search for OPERA-S1 masks in the given AOI and date range."""
+    start_date = (datetime.strptime(date, "%Y%m%d") - timedelta(days=delta)).strftime("%Y-%m-%d")  # noqa: DTZ007
+    end_date = (datetime.strptime(date, "%Y%m%d") + timedelta(days=delta)).strftime("%Y-%m-%d")  # noqa: DTZ007
+    date_range = (start_date, end_date)
+
+    results = earthaccess.search_data(
+        short_name="OPERA_L3_DSWX-S1_V1",
+        temporal=(date_range[0], date_range[1]),
+        bounding_box=aoi.bounds,
+    )
+
+    print(f"Found {len(results)} OPERA-S1 items within {delta} days of {date}.")
+    if len(results) == 0:
+        return None
+
+    data = {}
+    # Loop through each granule from OPERA and create a dictionary with the relevant metadata.
+    for item in results:
+        # get the id from the metadata
+        _id = cast("str", item["meta"]["native-id"])
+        parts = _id.split("_")
+        data[_id] = {
+            "tile": parts[3],
+            "date_str": parts[4][:-1],
+            "satellite": parts[-3],
+            "item": item,
+        }
+
+    opera_df = pd.DataFrame(data).T
+    opera_df["datetime"] = pd.to_datetime(opera_df["date_str"])
+    opera_df["date"] = opera_df["datetime"].dt.date
+    opera_df = opera_df.set_index("date")
+
+    ref_date = pd.to_datetime(date)
+    opera_df["delta_days"] = (ref_date - opera_df["datetime"].astype("datetime64[ns]")).abs()
+
+    return opera_df.sort_values("delta_days")
+
+
+def open_opera_s1(aoi: BaseGeometry, date: str) -> xr.DataArray | None:
+    """Open the OPERA-S1 mask for a given date."""
+    opera_df = search_opera_s1(aoi.centroid.buffer(0.001), date)
+
+    if opera_df is None:
+        print(f"No OPERA-S1 data found for {date}.")
+        return None
+
+    mask = open_opera_mask(opera_df.iloc[0]["item"], aoi=aoi)
+    mask = mask.where(mask < 200)
+
+    # Set mask attributes
+    mask.attrs["native-id"] = opera_df.iloc[0]["item"]["meta"]["native-id"]
+    mask.attrs["date"] = opera_df.index[0]
+    mask.attrs["satellite"] = opera_df.iloc[0]["satellite"]
+    mask.attrs["tile"] = opera_df.iloc[0]["tile"]
+    mask.attrs["date_str"] = opera_df.iloc[0]["date_str"]
+
+    null_values = int(mask.isnull().sum().values)  # noqa: PD003
+
+    # If there are null values, we will load the next closest image
+    if null_values == 0:
+        return mask
+
+    mask_2 = open_opera_mask(opera_df.iloc[1]["item"], aoi=aoi)
+    mask_2 = mask_2.where(mask_2 < 200)
+
+    cube = xr.concat([mask, mask_2], dim="img")
+    cube.data[cube.data == 3] = 1
+    array = cube.mean(dim="img")
+    array.data[array.data == 0.5] = 0
+    array.attrs = mask.attrs.copy()
+
+    return array

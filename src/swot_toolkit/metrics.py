@@ -1,6 +1,7 @@
 """Module to calculate the metrics for SWOT classification."""
 
 from typing import cast
+
 import numpy as np
 import xarray as xr
 from sklearn.metrics import (
@@ -18,14 +19,16 @@ def calc_metrics(
     ref_mask: xr.DataArray,
     pred_mask: xr.DataArray,
     metrics: list[str],
+    *,
+    binary: bool = False,
 ) -> dict[str, float]:
     """Calculate metrics comparing reference and predicted masks.
 
     values for input masks:
-    0: land
+    0: no water
     1: water
-    2: no_data (ignore in calculations)
-    3: non observed (considered for coverage)
+    2: no data (ignore in calculations)
+    3: flagged (considered for coverage)
 
     The Union of no_data will be removed completely from the matrices.
     The valid targets are 0 and 1.
@@ -37,21 +40,29 @@ def calc_metrics(
     Args:
         ref_mask: xarray DataArray of the reference mask.
         pred_mask: xarray DataArray of the predicted mask.
+        metrics: a list of the metrics to be calculated
+        binary: wether to consider a binary classification by setting 3 to 0
 
     Returns:
         dict: A dictionary containing the calculated metrics.
 
     """
+    # Convert everything to numpy
     ref_mask_np = ref_mask.to_numpy()
     pred_mask_np = pred_mask.to_numpy()
 
-    # First, lets create the no-data mask, to be used in the end.
+    # First, lets create the no-data mask, to remove these pixels.
     no_data_mask = (ref_mask_np == 2) | (pred_mask_np == 2)  # noqa: PLR2004
     no_data_mask = cast("np.ndarray", no_data_mask)
 
     # Now, we create the valid masks, removing no_data
     ref_mask_valid = ref_mask_np[~no_data_mask]
     pred_mask_valid = pred_mask_np[~no_data_mask]
+
+    results: dict[str, float] = {}
+    # results["valid_pixels"] = len(ref_mask_valid)
+    # results["no_data_pixels"] = no_data_mask.sum()
+    # results["flagged_pixels"] = (pred_mask_valid == 3).sum()  # noqa: PLR2004
 
     # Coverage: percentage of pixels that are not non-observed in
     # comparison to the valid pixels
@@ -67,6 +78,14 @@ def calc_metrics(
     else:
         water_coverage = np.nan
 
+    # Now, let's treat the flagged data. If it is a binary classification, we shall
+    # consider flagged data as no water (0).
+    if binary:
+        pred_mask_valid[pred_mask_valid == 3] = 0  # noqa: PLR2004
+        average = "binary"
+    else:
+        average = "weighted"
+
     # Now we create the confusion matrix
     cm = confusion_matrix(
         ref_mask_valid,
@@ -77,14 +96,13 @@ def calc_metrics(
     # Extract True Positives, False Positives, True Negatives, False Negatives
     tn, fp, fn, tp = cm.ravel()  # type: ignore[]
 
-    results: dict[str, float] = {}
     # Calculate metrics using scikit
     if "iou" in metrics:
-        iou = jaccard_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted")
+        iou = jaccard_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average=average)
         results["iou"] = round(float(iou), 4)
 
     if "f1" in metrics:
-        f1 = f1_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted")
+        f1 = f1_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average=average)
         results["f1"] = round(float(f1), 4)
 
     if "accuracy" in metrics:
@@ -93,11 +111,14 @@ def calc_metrics(
 
     if "precision" in metrics:
         precision = precision_score(
-            ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted"
+            ref_mask_valid,
+            pred_mask_valid,
+            labels=[0, 1],
+            average=average,
         )
         results["precision"] = round(float(precision), 4)
     if "recall" in metrics:
-        recall = recall_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average="weighted")
+        recall = recall_score(ref_mask_valid, pred_mask_valid, labels=[0, 1], average=average)
         results["recall"] = round(float(recall), 4)
 
     if "kappa" in metrics:

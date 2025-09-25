@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import cast
 
 import pandas as pd
+import planetary_computer as pc
+from matplotlib import pyplot as plt
+from odc.stac import stac_load  # type: ignore[]
 from shapely.geometry.base import BaseGeometry
 from tqdm.auto import tqdm
 
@@ -104,7 +107,7 @@ def create_s2_df(
     # Fill cloud assessment for Sentinel-2 scenes
     if assess_clouds:
         print("Assessing clouds in Sentinel-2 scenes...")
-        return assess_s2_clouds_new(s2_df, aoi=aoi_geometry)
+        return assess_s2_clouds_new(s2df=s2_df, aoi=aoi_geometry)
 
     return s2_df
 
@@ -137,7 +140,7 @@ def create_swot_mosaic_df(aoi_geometry: BaseGeometry, date_range: tuple[str, str
 
     # Create swot mosaics and store them into a dataframe
     print("Creating SWOT mosaics...")
-    return create_mosaic_df(swot_df, max_delta=30)
+    return create_mosaic_df(swot_df, max_delta=30).drop(columns=["delta"])
 
 
 def add_opera_info(
@@ -179,6 +182,9 @@ def add_opera_info(
         .rename(columns={"satellite": "OPERA"})
     )
     s2_df["date"] = s2_df["datetime"].dt.date
+
+    # Remove duplicate dates by keeping the one with the most valid pixels
+    s2_df = s2_df.loc[s2_df.groupby("date")["valid_pxls"].idxmax()]
     s2_df = s2_df.set_index("date")
 
     # aggregate the opera info into s2_df
@@ -213,6 +219,73 @@ def match_swot_mosaics_s2(mosaic_df: pd.DataFrame, s2_df: pd.DataFrame) -> pd.Da
         match_df = pd.concat([match_df, matched_s2.reset_index()], axis=0, ignore_index=True)
 
     return match_df.set_index("swot_mosaic_date")
+
+
+def generate_s2_figs_from_mosaic(
+    mosaic_date: str,
+    matches: pd.DataFrame,
+    aoi: BaseGeometry,
+    output_dir: Path,
+) -> pd.DataFrame:
+    """Generate figures for Sentinel-2 matches.
+
+    Parameters
+    ----------
+    mosaic_date : str
+        Date of the SWOT mosaic.
+    matches : pd.DataFrame
+        DataFrame containing matched SWOT mosaic dates and closest Sentinel-2 scenes.
+    aoi : BaseGeometry
+        The area of interest geometry.
+    output_dir : Path
+        Path to the output directory where figures will be saved.
+
+    Returns
+    -------
+    s2_matches : pd.DataFrame
+        DataFrame containing matched SWOT mosaic dates and closest Sentinel-2 scenes.
+
+    """
+    # Get the s2 items for the given mosaic date
+    s2_matches = cast("pd.DataFrame", matches.loc[mosaic_date])
+    s2_matches = s2_matches.sort_values(by="date")  # type: ignore[]
+
+    begin_date = s2_matches["date"].astype("str").iloc[0]
+    end_date = s2_matches["date"].astype("str").iloc[-1]
+    date_range = (begin_date, end_date)
+
+    tile = s2_matches["tile"].iloc[0]
+
+    results = search_s2(aoi, date_range, tile)
+
+    # Load all figures at once into a cube
+    cube = stac_load(
+        items=results,
+        bands=["B04", "B03", "B02"],
+        bbox=aoi.bounds,
+        patch_url=pc.sign,
+        dtype="uint16",
+        nodata=0,
+        resolution=100,
+        preserve_original_order=True,
+    )
+
+    # Save the figures to the output dir
+    fig, ax = plt.subplots(figsize=(10, 10))
+
+    for item in results:
+        time = cast("pd.Timestamp", pd.to_datetime(item.properties["datetime"][:-1]))
+
+        s2_img = cube.sel(time=time).to_array() / 10000
+        s2_img.plot.imshow(ax=ax, rgb="variable", vmin=0, vmax=0.5)
+
+        fname = item.id + "_thumb.png"
+        print(f"Saving figure {fname}...")
+        fig.savefig(output_dir / "figs/" / fname, dpi=150)
+        ax.clear()
+    fig.clear()
+
+    return s2_matches
 
 
 def prepare_aoi_dataframes(
@@ -270,7 +343,7 @@ def prepare_aoi_dataframes(
         output_dir / "dfs/s2_search_results.parquet",
         index=True,
     )
-    mosaic_df.drop(columns=["item", "delta"]).to_parquet(
+    mosaic_df.drop(columns=["item"]).to_parquet(
         output_dir / "dfs/swot_raster_results.parquet",
         index=True,
     )

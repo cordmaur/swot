@@ -3,6 +3,7 @@
 import json
 import os
 from datetime import datetime, timedelta
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -88,6 +89,29 @@ def auth_earthaccess() -> None:
 
 
 SWOT_DATASET = Literal["Pixel Cloud", "Raster_100"]
+
+
+def get_granule_url(granule: earthaccess.DataGranule) -> str:
+    """Get the download URL for a SWOT data granule.
+
+    Args:
+        granule (earthaccess.DataGranule): The SWOT data granule.
+
+    Raises:
+        ValueError: If the granule does not contain exactly one GET DATA URL.
+
+    Returns:
+        str: The download URL for the granule.
+
+    """
+    # Get the urls from the granule and filter the GET DATA one
+    urls = list(filter(lambda x: x["Type"] == "GET DATA", granule["umm"]["RelatedUrls"]))  # type: ignore[]
+    urls = cast("list[dict[str, str]]", urls)
+    if len(urls) != 1:
+        msg = f"Expected 1 GET DATA url, found {len(urls)}"
+        raise ValueError(msg)
+
+    return urls[0]["URL"]
 
 
 def search_swot_data(
@@ -254,6 +278,9 @@ def swot_results_to_df(
     # Drop the duplicates, considering the ID as reference
     if drop_duplicates:
         swot_df = swot_df[~swot_df.index.duplicated("last")]
+
+    swot_df["native-id"] = swot_df["item"].apply(lambda x: x["meta"]["native-id"])  # type: ignore[]
+    swot_df["url"] = swot_df["item"].apply(get_granule_url)
 
     return swot_df
 
@@ -855,14 +882,16 @@ def get_nadir_from_raster(ds: xr.Dataset, crs: CRS | None = None) -> LineString:
     return get_nadir_from_footprint(footprint)
 
 
+@cache
 def open_raster_file(
     file: str | Path,
-    variables: list[str],
+    variables: list[str] | tuple[str],
     aoi: BaseGeometry | None = None,
     *,
     exclude_no_data: bool = False,
 ) -> xr.Dataset:
     """Open SWOT file and clip it if necessary."""
+    variables = list(variables)
     # open the file
     ds = xrio.open_rasterio(file, mask_and_scale=True)[variables]  # type: ignore[]
     ds = cast("xr.Dataset", ds.squeeze())
@@ -911,7 +940,7 @@ def create_raster_mosaic(  # noqa: PLR0913
     ref_date: str | Timestamp,
     aoi: BaseGeometry,
     variable: str = "water_frac",
-    local_path: str = "/data/swot/downloads",
+    local_path: str | Path = "/data/swot/downloads",
     exclude_flags: list[str] | None = None,
     *,
     exclude_no_data: bool = False,
@@ -941,9 +970,8 @@ def create_raster_mosaic(  # noqa: PLR0913
 
     Returns
     -------
-    gpd.GeoDataFrame
-        GeoDataFrame with one row per tile, containing the closest observation
-        to the reference date for each tile.
+    xr.DataArray
+        DataArray with the mean value for the variable. Flagged values will be set to -1
 
     """
     # Find the closest items for mosaic creation
@@ -951,16 +979,32 @@ def create_raster_mosaic(  # noqa: PLR0913
     # the ref_date must be in the first level and the result is a dataframe
     mosaic_items = cast("pd.DataFrame", mosaic_df.loc[ref_date])
 
-    items = cast("list[earthaccess.DataGranule]", mosaic_items["item"].to_list())
-    mosaic_files = earthaccess.download(
-        items,
-        local_path=local_path,
-        pqdm_kwargs={"disable": True},
+    # Considering earthaccess.download is costly, we first try to locate the
+    # files directly on the local_path
+    local_path = Path(local_path)
+    mosaic_files_s = cast(
+        "pd.Series",
+        mosaic_items["native-id"].apply(lambda x: next(local_path.glob(f"{x}*"), None)),  # type: ignore[]
     )
+
+    # If all files are found locally, we can skip the download
+    if mosaic_files_s.all():
+        mosaic_files = cast("list[Path]", mosaic_files_s.to_list())
+    else:
+        if "items" in mosaic_items.columns:
+            items = cast("list[earthaccess.DataGranule]", mosaic_items["item"].to_list())
+        else:
+            items = mosaic_items["url"].to_list()
+
+        mosaic_files = earthaccess.download(
+            items,
+            local_path=local_path,
+            pqdm_kwargs={"disable": True},
+        )
 
     # Open the patches
     # include the quality flag in the variables list
-    variables = [variable, "water_area_qual_bitwise"]
+    variables = cast("tuple[str]", (variable, "water_area_qual_bitwise"))
     patches = [
         open_raster_file(file, aoi=aoi, variables=variables, exclude_no_data=exclude_no_data)
         for file in mosaic_files
@@ -973,7 +1017,6 @@ def create_raster_mosaic(  # noqa: PLR0913
     # Apply quality flag filtering to each patch
     exclude_flags = [] if exclude_flags is None else exclude_flags
 
-    masks = []
     for i, patch in enumerate(patches):
         # Apply quality flag filtering to each patch
         if exclude_no_data:
@@ -982,18 +1025,28 @@ def create_raster_mosaic(  # noqa: PLR0913
                 patch["water_area_qual_bitwise"],
                 flags=["outside_scene_bounds", "outside_data_window"],
             )
-            patch = patch.where(~no_data_mask)
-
-            masks.append(no_data_mask)
+            patch = patch.where(~no_data_mask)  # noqa: PLW2901
 
         # Now let's treat the quality flags
         quality_mask = mask_by_flags(patch["water_area_qual_bitwise"], exclude_flags)
 
+        bitwise_flags = patch["water_area_qual_bitwise"].copy()
+
         # The pixels that do not pass the quality mask will be set to -1 (non-observed data)
         patches[i] = patch.where(~quality_mask, other=-1).clip(max=1)
+        patches[i]["water_area_qual_bitwise"] = bitwise_flags
 
-        # masks.append(quality_mask)
+    # Concat the patches
+    raster = xr.concat(patches, dim="idx").squeeze()
 
-    return patches, masks
-    # Concatenate all patches into one DataFrame
-    return xr.concat(patches, dim="idx").squeeze(), masks
+    # Now we have to create a mask for the flagged pixels
+    # Considering the flagged have a value of 2, we will compute the mean
+    # If the result is different from 2, there is a valid pixel somewhere.
+    raster_mean = raster.mean(dim="idx")
+    flagged_mask = raster_mean == -1
+
+    # Now that we have the flagged mask, we can compute the mean ignoring the flags.
+    raster = raster.where(raster != -1).mean(dim="idx")
+    raster = raster.where(~flagged_mask, other=-1)
+
+    return raster, patches

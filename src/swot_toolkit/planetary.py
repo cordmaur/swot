@@ -3,7 +3,6 @@
 from datetime import datetime, timedelta
 from typing import cast
 
-import numpy as np
 import pandas as pd
 import planetary_computer as pc
 import pystac_client
@@ -59,6 +58,7 @@ def guess_best_s2_tile(aoi: BaseGeometry) -> str | None:
     )
 
     s2_df = s2_results_to_df(search.item_collection())
+
     tiles = s2_df["tile"].unique()
     s2_null_values: dict[str, int] = {}
     for tile in tiles:
@@ -76,7 +76,12 @@ def guess_best_s2_tile(aoi: BaseGeometry) -> str | None:
         print(f"Tile {tile} has {s2_null_values[tile]} null values.")
 
     # Return the tile with the least null values
-    return min(s2_null_values.keys(), key=lambda k: s2_null_values[k]) if s2_null_values else None
+    best_tile = (
+        min(s2_null_values.keys(), key=lambda k: s2_null_values[k]) if s2_null_values else None
+    )
+    print(f"Best tile is {best_tile}.")
+
+    return best_tile
 
 
 def search_s2(
@@ -139,7 +144,7 @@ def find_closest_s2(
         raise ValueError(msg)
 
     # get the delta time for all s2 images and filter those within max_days
-    s2df["delta"] = s2df["datetime"] - pd.to_datetime(ref_time)
+    s2df["delta"] = s2df["datetime"].astype("datetime64[ns]") - pd.to_datetime(ref_time)
     delta = s2df[s2df["delta"].abs() < timedelta(days=max_days)]
 
     # now, order by the closest
@@ -379,7 +384,8 @@ def parse_s2_id(s2_id: str) -> dict[str, str | int | float]:
     """
     parts = s2_id.split("_")
     if len(parts) != 6:
-        raise ValueError(f"Invalid Sentinel-2 ID format: {s2_id}")
+        msg = f"Invalid Sentinel-2 ID format: {s2_id}"
+        raise ValueError(msg)
 
     mission = parts[0]
     product_level = parts[1][3:]  # Remove "MSI" prefix
@@ -397,3 +403,63 @@ def parse_s2_id(s2_id: str) -> dict[str, str | int | float]:
         "tile": tile,
         "date": sensing_date[:8],
     }
+
+
+def open_s2_array(
+    s2_id: str | Item,
+    aoi: BaseGeometry,
+    bands: list[str] | None = None,
+) -> xr.DataArray:
+    """Open a Sentinel-2 image as an xarray DataArray.
+
+    Parameters
+    ----------
+    s2_id : str | Item
+        Sentinel-2 ID string or STAC Item object representing the S2 image to open.
+    aoi : BaseGeometry
+        Area of Interest as a Shapely geometry object (e.g., Polygon, Point).
+    bands : list[str]
+        List of band names to load (e.g., ['B04', 'B08']).
+
+    Returns
+    -------
+    xr.DataArray
+        xarray DataArray containing the requested bands from the Sentinel-2 image.
+
+    Raises
+    ------
+    ValueError
+        If the provided s2_id is neither a string nor a STAC Item.
+
+    """
+    if isinstance(s2_id, str):
+        collection = catalog.get_collection("sentinel-2-l2a")
+        s2_item = collection.get_item(id=s2_id)
+        if s2_item is None:
+            msg = f"Sentinel-2 item with ID {s2_id} not found in catalog."
+            raise ValueError(msg)
+    else:
+        s2_item = s2_id
+
+    if bands is None:
+        bands = [
+            "B02",
+            "B03",
+            "B04",
+            "B08",
+            "B11",
+            "B12",
+            "SCL",
+        ]  # Default bands if none specified
+
+    # Load the data using odc.stac
+    cube = stac_load(
+        [s2_item],  # List of STAC items (can pass multiple)
+        bands=bands,  # Bands to load
+        resolution=10,  # Output pixel size
+        bbox=aoi.bounds,
+        dtype="uint16",
+        patch_url=pc.sign,  # Function to sign the URLs
+    )
+
+    return cube[bands].squeeze().to_array(dim="band")  # type: ignore[]
