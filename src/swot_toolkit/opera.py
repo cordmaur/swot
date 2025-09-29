@@ -72,11 +72,11 @@ def open_opera_mask(
         msg = f"No WTR file found for {item['meta']['native-id']}"
         raise ValueError(msg)
 
-    array = cast("xr.DataArray", xrio.open_rasterio(wtr[0], masked=False))
+    array = cast("xr.DataArray", xrio.open_rasterio(wtr[0], masked=False)).squeeze()
 
     # crs is informed, reproject the array, otherwise use the original crs
     if crs is not None:
-        array = array.rio.reproject(crs).squeeze()
+        array = array.rio.reproject(crs)
     else:
         crs = array.rio.crs
 
@@ -314,7 +314,14 @@ def plot_opera_array(
     array = array.squeeze().sel(x=slice(None, None, down_factor), y=slice(None, None, down_factor))
 
     # Plot the image and get the mappable
-    img = array.plot.imshow(ax=ax, cmap=custom_cmap, norm=norm, add_colorbar=False)
+    img = array.plot.imshow(
+        ax=ax,
+        cmap=custom_cmap,
+        norm=norm,
+        add_colorbar=False,
+        interpolation="antialiased",
+        interpolation_stage="rgba",
+    )  # type: ignore[call-arg]
 
     # If demanded, take care of the colorbar
     if add_colorbar:
@@ -336,7 +343,7 @@ def plot_opera_array(
 ######################################
 # OPERA-S1 functions
 ######################################
-def search_opera_s1(aoi: BaseGeometry, date: str, delta: int = 15) -> pd.DataFrame | None:
+def search_opera_s1(aoi: BaseGeometry, date: str, delta: int = 20) -> pd.DataFrame | None:
     """Search for OPERA-S1 masks in the given AOI and date range."""
     start_date = (datetime.strptime(date, "%Y%m%d") - timedelta(days=delta)).strftime("%Y-%m-%d")  # noqa: DTZ007
     end_date = (datetime.strptime(date, "%Y%m%d") + timedelta(days=delta)).strftime("%Y-%m-%d")  # noqa: DTZ007
@@ -384,7 +391,7 @@ def open_opera_s1(aoi: BaseGeometry, date: str) -> xr.DataArray | None:
         print(f"No OPERA-S1 data found for {date}.")
         return None
 
-    mask = open_opera_mask(opera_df.iloc[0]["item"], aoi=aoi)
+    mask = open_opera_mask(opera_df.iloc[0]["item"], aoi=aoi, crs=None)
     mask = mask.where(mask < 200)
 
     # Set mask attributes
@@ -400,13 +407,26 @@ def open_opera_s1(aoi: BaseGeometry, date: str) -> xr.DataArray | None:
     if null_values == 0:
         return mask
 
-    mask_2 = open_opera_mask(opera_df.iloc[1]["item"], aoi=aoi)
+    mask_2 = open_opera_mask(opera_df.iloc[1]["item"], aoi=aoi, crs=None)
     mask_2 = mask_2.where(mask_2 < 200)
 
     cube = xr.concat([mask, mask_2], dim="img")
-    cube.data[cube.data == 3] = 1
+    # Change partial water to value 3, this way we will have the following possibilities in the mean
+    # 0 - no water
+    # 1 - water
+    # 3 - partial water
+    # mean(0, 1) = 0.5 -> no water
+    # mean(0, 3) = 1.5 -> no water
+    # mean(1, 3) = 2.0 -> water
+    # mean(0, 0) = 0.0 -> no water
+    # mean(1, 1) = 1.0 -> water
+    # mean(3, 3) = 3.0 -> partial water
+    cube.data[cube.data == 2] = 3
     array = cube.mean(dim="img")
+    array.data[array.data == 2] = 1
+    array.data[array.data == 3] = 2
     array.data[array.data == 0.5] = 0
+    array.data[array.data == 1.5] = 0
     array.attrs = mask.attrs.copy()
 
     return array

@@ -1,6 +1,5 @@
 """Implementation of Pipeline 1: Data Download."""
 
-import json
 from pathlib import Path
 
 from matplotlib import pyplot as plt
@@ -17,22 +16,24 @@ from swot_toolkit.swot import auth_earthaccess
 
 auth_earthaccess()
 
+OUTPUT_DIR = "/data/swot/output/"
 
-def open_output_dir(output_dir: str | Path) -> tuple[BaseGeometry, dict[str, str]]:
+
+def open_output_dir(region: str, date: str) -> tuple[Path, BaseGeometry, str]:
     """Open an existing output directory structure for a given AOI.
 
     This function opens the AOI kml and the reference S2_IDs from the directory'.
 
     Args:
-        output_dir (str | Path): Path to the base output directory.
+        region (str): Path to the base output directory.
+        date (str): Date of the swot mosaic.
 
     Returns:
         tuple[BaseGeometry, dict[str, str]]: A tuple containing the AOI geometry and a
         dictionary of S2 IDs.
 
     """
-    # Create a path for the base output
-    output_dir = Path(output_dir)
+    output_dir = Path(OUTPUT_DIR) / region / date
 
     # Check if it exists
     if not output_dir.exists():
@@ -40,16 +41,16 @@ def open_output_dir(output_dir: str | Path) -> tuple[BaseGeometry, dict[str, str
         raise FileNotFoundError(msg)
 
     # Read the AOI (the first KML found in kml folder)
-    kml_dir = output_dir / "kml"
+    kml_dir = output_dir.parent / "kml"
     kml_file = next(kml_dir.glob("*.kml"))
     print(f"Reading KML file: {kml_file}")
     aoi = read_kml_geometry(kml_file)[0]
 
     # read the S2_IDS.json
-    with (output_dir / "S2_IDS.json").open("r") as f:
-        s2_ids = json.load(f)
+    with (output_dir / "s2_id.txt").open("r") as f:
+        s2_id = f.read()
 
-    return aoi, s2_ids
+    return output_dir, aoi, s2_id
 
 
 def download_opera_s2_masks(
@@ -81,11 +82,11 @@ def download_opera_s2_masks(
         # Save the OPERA thumbnail to the figs directory
         plot_opera_array(opera_mask, ax=ax, add_colorbar=not bool(i))
         fname = opera_mask.attrs["native-id"]
-        fig.savefig(Path(output_dir) / "figs" / f"{fname}_thumb.png")
+        fig.savefig(Path(output_dir) / "figs" / f"{fname}.png")
         ax.clear()
 
         # Save the OPERA mask to the opera directory
-        out_path = Path(output_dir) / "opera" / f"{fname}.tif"
+        out_path = Path(output_dir) / "opera_s2" / f"OPERA_S2_{fname}.tif"
         opera_mask.rio.to_raster(out_path, compress="DEFLATE")
 
         opera_mask = open_opera_mask_from_datetime(
@@ -130,7 +131,7 @@ def download_opera_s1_masks(s2_ids: list[str], aoi: BaseGeometry, output_dir: st
         # Save the OPERA thumbnail to the figs directory
         plot_opera_array(opera_s1_mask, ax=ax, add_colorbar=not bool(i))
         fname = opera_s1_mask.attrs["native-id"]
-        fig.savefig(Path(output_dir) / "figs" / f"{fname}_thumb.png")
+        fig.savefig(Path(output_dir) / "figs" / f"OPERA_S1_{fname}.png")
         ax.clear()
 
         # Save the OPERA mask to the opera directory
@@ -152,13 +153,29 @@ def download_s2_data(s2_ids: list[str], aoi: BaseGeometry, output_dir: str | Pat
         None
 
     """
+    # Create a figure to save the thumbnails
+    fig, ax = plt.subplots(figsize=(10, 10))
+
     for s2_id in s2_ids:
         print(f"Downloading Sentinel-2 data for S2 ID: {s2_id}")
         s2_array = open_s2_array(s2_id, aoi=aoi, bands=None)
 
+        # Save the OPERA thumbnail to the figs directory
+        rgb = s2_array.sel(
+            x=slice(None, None, 10),
+            y=slice(None, None, 10),
+            band=["B04", "B03", "B02"],
+        )
+        rgb.plot.imshow(rgb="band", vmin=500, vmax=2500, ax=ax)
+        fname = s2_id
+        fig.savefig(Path(output_dir) / "figs" / f"RGB_{fname}.png")
+        ax.clear()
+
         # Save the Sentinel-2 data to the s2 directory
         out_path = Path(output_dir) / "s2" / f"{s2_id}.tif"
         s2_array.rio.to_raster(out_path, compress="DEFLATE")
+
+    fig.clear()
 
 
 def download_opera_data(

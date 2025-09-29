@@ -3,7 +3,9 @@
 from typing import cast
 
 import numpy as np
+import pandas as pd
 import xarray as xr
+from rasterio.enums import Resampling
 from sklearn.metrics import (
     accuracy_score,
     cohen_kappa_score,
@@ -21,7 +23,7 @@ def calc_metrics(
     metrics: list[str],
     *,
     binary: bool = False,
-) -> dict[str, float]:
+) -> pd.DataFrame:
     """Calculate metrics comparing reference and predicted masks.
 
     values for input masks:
@@ -47,6 +49,11 @@ def calc_metrics(
         dict: A dictionary containing the calculated metrics.
 
     """
+    # First thing is to ensure both masks have the same shape
+    # Considering the ref_mask is the higher resolution, we will coarse it to match pred_mask
+    if ref_mask.shape != pred_mask.shape:
+        ref_mask = ref_mask.rio.reproject_match(pred_mask, resampling=Resampling.mode)
+
     # Convert everything to numpy
     ref_mask_np = ref_mask.to_numpy()
     pred_mask_np = pred_mask.to_numpy()
@@ -131,4 +138,4 @@ def calc_metrics(
     if "water_coverage" in metrics:
         results["water_coverage"] = round(float(water_coverage), 4)
 
-    return results
+    return pd.DataFrame.from_dict(results, orient="index")

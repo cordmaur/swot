@@ -1,7 +1,6 @@
 """Quality Flags."""
 
 import numpy as np
-
 import xarray as xr
 
 # Quality flag definitions from the table in:
@@ -10,7 +9,9 @@ import xarray as xr
 QUALITY_FLAGS = {
     "classification_qual_suspect": 1,
     "geolocation_qual_suspect": 2,
+    "water_fraction_suspect": 3,
     "large_uncert_suspect": 5,
+    "dark_water_suspect": 6,
     "bright_land": 7,
     "low_coherence_water_suspect": 8,
     "specular_ringing_prior_water_suspect": 9,
@@ -30,7 +31,7 @@ QUALITY_FLAGS = {
 
 
 def mask_by_flags(
-    flag_array: xr.DataArray | np.ndarray,
+    flag_array: xr.DataArray,
     flags: list[str],
 ) -> np.ndarray:
     """Create a boolean mask for pixels that have any of the specified quality flags set.
@@ -110,3 +111,60 @@ def count_pixels_by_flag(array: np.ndarray, flag_name: str) -> float:
     mask = (data & (1 << bit)) != 0
     # Compute the fraction of pixels with the flag set
     return mask.sum() / array.size
+
+
+def decode_swot_flag(flag_value: int, *, verbose: bool = True) -> list[str]:
+    """Decode SWOT quality flags from a decimal value.
+
+    Parameters
+    ----------
+    flag_value : int
+        Decimal flag value to decode
+    verbose : bool
+        Whether to print detailed information
+
+    Returns
+    -------
+    list
+        List of active flag names
+
+    """
+    if verbose:
+        print(f"Flag value: {flag_value}")
+        print(f"Binary: {bin(flag_value)} ({flag_value:032b})")
+        print("-" * 50)
+
+    active_flags: list[str] = []
+
+    for flag_name, bit_position in QUALITY_FLAGS.items():
+        # Check if the bit at this position is set
+        if flag_value & (1 << bit_position):
+            active_flags.append(flag_name)
+            if verbose:
+                print(f"✓ Bit {bit_position:2d}: {flag_name}")
+        elif verbose:
+            print(f"  Bit {bit_position:2d}: {flag_name}")
+
+    for bit in range(32):
+        if flag_value & (1 << bit) and bit not in QUALITY_FLAGS.values():
+            # Found a bit, now check if it exists in the QUALITY_FLAGS
+            print(f"⚠️ Bit {bit:2d}: Unknown flag")
+
+    if verbose:
+        print(f"\nActive flags: {len(active_flags)}")
+        for flag in active_flags:
+            print(f"  - {flag}")
+
+    return active_flags
+
+
+def decode_active_flags(flags_array: xr.DataArray) -> set[str]:
+    flag_values = np.unique(flags_array.data)
+    all_active_flags: set[str] = set()
+    for value in flag_values:
+        if np.isnan(value):
+            continue
+        active_flags = decode_swot_flag(int(value), verbose=False)
+        all_active_flags.update(active_flags)
+
+    return all_active_flags

@@ -166,7 +166,7 @@ def search_swot_data(
 
     """
     # Search for SWOT data granules intersecting the AOI
-    short_name = "SWOT_L2_HR_Raster_D" if dataset == "Raster_100" else "SWOT_L2_HR_PIXC_D"
+    short_name = "SWOT_L2_HR_PIXC_D" if dataset == "Pixel Cloud" else "SWOT_L2_HR_Raster_D"
     results = earthaccess.search_data(
         short_name=short_name,
         bounding_box=aoi.bounds,
@@ -905,7 +905,7 @@ def open_raster_file(
     if exclude_no_data:
         # Create a mask around nadir to remove near swath pixels
         nadir = get_nadir_from_raster(ds, crs)
-        inner_swath = nadir.buffer(10000, cap_style="flat")
+        inner_swath = nadir.buffer(10000, cap_style="flat")  # type: ignore[]
         nadir_mask = cast(
             "np.ndarray",
             geometry_mask(

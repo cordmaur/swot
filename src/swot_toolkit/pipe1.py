@@ -61,7 +61,8 @@ def create_output_dir(aoi_kml: str | Path, output_dir: str | Path) -> Path:
     print(f"Output directory created at: {output_dir}")
 
     # Create subfolders for [kml, ref_masks, opera, s2, swot, logs]
-    subfolders = ["kml", "ref_masks", "opera", "s2", "swot", "logs", "dfs", "figs"]
+    # subfolders = ["kml", "ref_masks", "opera", "s2", "swot", "logs", "dfs", "figs"]
+    subfolders = ["kml", "dfs", "figs"]
     for folder in subfolders:
         (output_dir / folder).mkdir(parents=True, exist_ok=True)
 
@@ -353,3 +354,36 @@ def prepare_aoi_dataframes(
     )
 
     return output_dir
+
+
+def create_date_subfolder(output_dir: str | Path, date: str, s2_id: str) -> Path:
+    """Create a subfolder for a specific date and Sentinel-2 ID.
+
+    This function creates a subfolder within the specified output directory,
+    named after the given date. Inside this date-specific folder, another subfolder
+    is created for the provided Sentinel-2 ID. The function ensures that the
+    directory structure is created if it does not already exist.
+
+    Args:
+        output_dir (str | Path): Path to the base output directory.
+        date (str): Date string to name the subfolder (e.g., '2023-01-01').
+        s2_id (str): Sentinel-2 ID to name the inner subfolder.
+
+    Returns:
+        Path: The path to the created subfolder.
+
+    """
+    # Create the date-specific subfolder
+    output_dir = Path(output_dir)
+    date_dir = output_dir / date
+
+    # Create the subfolders
+    subfolders = ["kml", "ref_mask", "opera_s2", "opera_s1", "s2", "swot", "figs"]
+    for folder in subfolders:
+        (date_dir / folder).mkdir(parents=True, exist_ok=True)
+
+    # Save the s2_id in a text file inside the date folder
+    with (date_dir / "s2_id.txt").open("w") as f:
+        f.write(s2_id)
+
+    return date_dir
