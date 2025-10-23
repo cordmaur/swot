@@ -46,12 +46,13 @@ def mask_by_flags(
     """
     # Create a mask for pixels matching any of the flags
     mask = np.zeros(flag_array.shape, dtype=bool)
+    flag_array_np = flag_array.fillna(0).data.astype("uint32")
 
     for flag_name in flags:
         # Get the bit position for the flag name
         bit = QUALITY_FLAGS.get(flag_name)
         if bit is not None:
-            mask |= (flag_array.fillna(0).astype("int") & (1 << bit)).astype(bool)
+            mask |= (flag_array_np & (1 << bit)) != 0
 
     return mask
 

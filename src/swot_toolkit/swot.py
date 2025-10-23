@@ -15,6 +15,7 @@ import rioxarray as xrio
 import xarray as xr
 from pandas import Timestamp
 from pyproj import CRS, Transformer
+from rasterio.enums import Resampling  # type: ignore  # noqa: PGH003
 from rasterio.features import geometry_mask  # type: ignore  # noqa: PGH003
 from shapely import LineString
 from shapely.geometry import Polygon, box
@@ -22,7 +23,7 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform
 
 from .flags import mask_by_flags
-from .utils import project_root
+from .utils import create_template_dataarray, project_root
 
 if TYPE_CHECKING:
     from pandas import DatetimeIndex
@@ -888,6 +889,7 @@ def open_raster_file(
     variables: list[str] | tuple[str],
     aoi: BaseGeometry | None = None,
     *,
+    dst_crs: CRS | None = None,
     exclude_no_data: bool = False,
 ) -> xr.Dataset:
     """Open SWOT file and clip it if necessary."""
@@ -896,15 +898,15 @@ def open_raster_file(
     ds = xrio.open_rasterio(file, mask_and_scale=True)[variables]  # type: ignore[]
     ds = cast("xr.Dataset", ds.squeeze())
 
-    # Get the CRS of the dataset
-    crs = ds.rio.crs
+    # Get the original CRS of the dataset
+    src_crs = ds.rio.crs
 
     # The "land" pixels come with NaN values, so we will fill them with 0
     ds = ds.fillna(0)
 
     if exclude_no_data:
         # Create a mask around nadir to remove near swath pixels
-        nadir = get_nadir_from_raster(ds, crs)
+        nadir = get_nadir_from_raster(ds, src_crs)
         inner_swath = nadir.buffer(10000, cap_style="flat")  # type: ignore[]
         nadir_mask = cast(
             "np.ndarray",
@@ -918,19 +920,33 @@ def open_raster_file(
         ds = ds.where(~nadir_mask)
 
     # Ensure the dataset has a CRS assigned
-    ds = ds.rio.write_crs(crs)
+    ds = ds.rio.write_crs(src_crs)
 
     if aoi is not None:
+        # If we are clipping the raster, it's desirable to use a dst_crs
+        # So we can get the whole area with data
+        if dst_crs is not None and dst_crs != src_crs:
+            ds = ds.rio.reproject(dst_crs, resampling=Resampling.nearest)
+        else:
+            dst_crs = src_crs
+
+        # Force the dst_crs to be a CRS object
+        dst_crs = cast("CRS", dst_crs)
+
         # we need to project the AOI to the dataset CRS
-        transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+        transformer = Transformer.from_crs("EPSG:4326", dst_crs, always_xy=True)
         aoi_proj = transform(transformer.transform, aoi)
 
-        return ds.rio.clip(
-            [aoi_proj],
-            crs=crs,
-            drop=True,
-            all_touched=True,
-        )  # type: ignore[]
+        # Clip the dataset by the projected AOI
+        ds = ds.rio.clip_box(*aoi_proj.bounds)  # type: ignore[]
+
+        # Now, we have to make sure the ds has the final shape we want,
+        # even if the AOI is greater than the dataset bounds
+        # for that, we will create a template array and then reproject the ds to that array
+        res = ds.rio.resolution()[0]
+        template = create_template_dataarray(aoi_proj.bounds, crs=dst_crs, resolution=res)
+
+        ds = ds.rio.reproject_match(template, resampling=Resampling.nearest)
 
     return ds
 
@@ -943,8 +959,9 @@ def create_raster_mosaic(  # noqa: PLR0913
     local_path: str | Path = "/data/swot/downloads",
     exclude_flags: list[str] | None = None,
     *,
+    dst_crs: CRS | None = None,
     exclude_no_data: bool = False,
-) -> xr.DataArray:
+) -> tuple[xr.Dataset, list[xr.Dataset], list[np.ndarray]]:
     """Create a mosaic GeoDataFrame from SWOT data around a reference date.
 
     The mosaic_df already has the closest observations for each tile.
@@ -965,6 +982,8 @@ def create_raster_mosaic(  # noqa: PLR0913
         Local path to save the downloaded files.
     exclude_flags :
         List of quality flags to exclude from the mosaic. If None, a default set is used.
+    dst_crs : CRS | None, optional
+        The coordinate reference system to reproject the data to. If None, no reprojection is done.
     exclude_no_data :
         Whether to exclude no-data pixels from the mosaic. Default is False.
 
@@ -977,19 +996,19 @@ def create_raster_mosaic(  # noqa: PLR0913
     # Find the closest items for mosaic creation
     # Considering the mosaic_df has a 2-level index with mosaic_date and tile_name
     # the ref_date must be in the first level and the result is a dataframe
-    mosaic_items = cast("pd.DataFrame", mosaic_df.loc[ref_date])
+    mosaic_items = mosaic_df.loc[ref_date]
 
     # Considering earthaccess.download is costly, we first try to locate the
     # files directly on the local_path
     local_path = Path(local_path)
-    mosaic_files_s = cast(
+    mosaic_files = cast(
         "pd.Series",
         mosaic_items["native-id"].apply(lambda x: next(local_path.glob(f"{x}*"), None)),  # type: ignore[]
     )
 
     # If all files are found locally, we can skip the download
-    if mosaic_files_s.all():
-        mosaic_files = cast("list[Path]", mosaic_files_s.to_list())
+    if mosaic_files.all():
+        mosaic_files = cast("list[Path]", mosaic_files.to_list())
     else:
         if "items" in mosaic_items.columns:
             items = cast("list[earthaccess.DataGranule]", mosaic_items["item"].to_list())
@@ -1006,17 +1025,21 @@ def create_raster_mosaic(  # noqa: PLR0913
     # include the quality flag in the variables list
     variables = cast("tuple[str]", (variable, "water_area_qual_bitwise"))
     patches = [
-        open_raster_file(file, aoi=aoi, variables=variables, exclude_no_data=exclude_no_data)
+        open_raster_file(
+            file, aoi=aoi, variables=variables, dst_crs=dst_crs, exclude_no_data=exclude_no_data
+        )
         for file in mosaic_files
     ]
 
-    # Assuming the first patch as reference, let's make the others match its shape
-    ref_patch = patches[0]
-    patches = [patch.rio.reproject_match(ref_patch).squeeze() for patch in patches]
+    # Here, even if we have the rasters clipped and in the same CRS, they may
+    # not be aligned correctly, because they may have come from different projections
+    # In this case, we will make sure they align correctly
+    patches: list[xr.Dataset] = [p.rio.reproject_match(patches[0]) for p in patches]
 
     # Apply quality flag filtering to each patch
     exclude_flags = [] if exclude_flags is None else exclude_flags
 
+    no_data_masks: list[np.ndarray] = []
     for i, patch in enumerate(patches):
         # Apply quality flag filtering to each patch
         if exclude_no_data:
@@ -1029,11 +1052,14 @@ def create_raster_mosaic(  # noqa: PLR0913
 
         # Now let's treat the quality flags
         quality_mask = mask_by_flags(patch["water_area_qual_bitwise"], exclude_flags)
+        no_data_masks.append(quality_mask)
 
         bitwise_flags = patch["water_area_qual_bitwise"].copy()
 
         # The pixels that do not pass the quality mask will be set to -1 (non-observed data)
-        patches[i] = patch.where(~quality_mask, other=-1).clip(max=1)
+        patches[i] = patch.where(~quality_mask, other=-1)
+        if variable == "water_frac":
+            patches[i] = patches[i].clip(max=1)
         patches[i]["water_area_qual_bitwise"] = bitwise_flags
 
     # Concat the patches
@@ -1049,4 +1075,4 @@ def create_raster_mosaic(  # noqa: PLR0913
     raster = raster.where(raster != -1).mean(dim="idx")
     raster = raster.where(~flagged_mask, other=-1)
 
-    return raster, patches
+    return raster, patches, no_data_masks

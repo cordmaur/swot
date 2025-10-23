@@ -1,5 +1,6 @@
 """Implementation of Pipeline 1: Data Download."""
 
+from functools import cache
 from pathlib import Path
 
 from matplotlib import pyplot as plt
@@ -18,7 +19,7 @@ auth_earthaccess()
 
 OUTPUT_DIR = "/data/swot/output/"
 
-
+@cache
 def open_output_dir(region: str, date: str) -> tuple[Path, BaseGeometry, str]:
     """Open an existing output directory structure for a given AOI.
 

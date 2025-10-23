@@ -4,7 +4,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
+import numpy as np
 import pandas as pd
+from pyproj import CRS
+import xarray as xr
 from pandas import Timestamp
 from tqdm.auto import tqdm
 
@@ -265,3 +268,45 @@ def match_datasets_by_time(  # noqa: PLR0913
 
     # Create multi-level index with original index and time delta
     return joined.reset_index().set_index(["index", "delta_target"])
+
+
+def create_template_dataarray(
+    bounds: tuple[float, ...],
+    resolution: float,
+    crs: CRS,
+    fill_value: float = np.nan,
+) -> xr.DataArray:
+    """Create a template xarray DataArray with specified bounds, resolution, and CRS.
+
+    Parameters
+    ----------
+    bounds : tuple
+        (left, bottom, right, top) in CRS units
+    resolution : float
+        Pixel size in CRS units
+    crs : str or rasterio.crs.CRS
+        Coordinate reference system
+    fill_value : numeric
+        Initial fill value for the array
+
+    """
+    left, bottom, right, top = bounds
+
+    # Calculate dimensions
+    width = int((right - left) / resolution)
+    height = int((top - bottom) / resolution)
+
+    # Create coordinate arrays
+    x = np.linspace(left + resolution / 2, right - resolution / 2, width)
+    y = np.linspace(top - resolution / 2, bottom + resolution / 2, height)
+
+    # Create empty data array
+    data = np.full((height, width), fill_value, dtype=np.float32)
+
+    # Create xarray DataArray
+    da = xr.DataArray(data, coords={"y": y, "x": x}, dims=["y", "x"])
+
+    # Set CRS
+    da.rio.write_crs(crs, inplace=True)
+
+    return da

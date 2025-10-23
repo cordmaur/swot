@@ -17,6 +17,110 @@ from sklearn.metrics import (
 )
 
 
+def match_projections(arrays: list[xr.DataArray]) -> list[xr.DataArray]:
+    """Reproject all arrays to the projection of the array that has the coarser resolution.
+
+    Args:
+        arrays: list of xarray DataArrays to be reprojected.
+
+    Returns:
+        list of reprojected xarray DataArrays.
+
+    """
+    # First, we identify the array with the coarser resolution
+    # We assume all arrays cover the same region, so the coarser resolution
+    # is the array with lower number of pixels
+    sizes = [arr.size for arr in arrays]
+    ref_array = arrays[np.argmin(sizes)]
+
+    # Now we reproject all arrays to the projection of the ref_array
+    reprojected_arrays: list[xr.DataArray] = []
+    for arr in arrays:
+        if arr.size != ref_array.size or arr.rio.crs != ref_array.rio.crs:
+            arr_reprojected = arr.rio.reproject_match(
+                ref_array,
+                resampling=Resampling.mode,
+            )
+            arr_reprojected.data[arr_reprojected.data == 255] = 2  # Set no data to 2
+            reprojected_arrays.append(arr_reprojected)
+        else:
+            reprojected_arrays.append(arr)
+
+    return reprojected_arrays
+
+
+def process_opera_mask(opera_mask: xr.DataArray, *, include_partial: bool = False) -> xr.DataArray:
+    """Process OPERA mask to match SWOT classification scheme.
+
+    OPERA mask values:
+    0: not water (white)
+    1: open water (blue)
+    2: partial surface water *(light green)
+    *252: snow/ice (cyan)
+    *253: cloud/cloud shadow (gray)
+    *254: ocean masked (dark blue)
+    255: no data (transparent)
+
+
+    SWOT classification scheme:
+    0: no water
+    1: water
+    2: no data (ignore in calculations)
+    3: flagged (considered for coverage)
+
+    We will consider cloud, shadow and snow/ice as flagged (3).
+    Land will be considered as no water (0).
+
+    Args:
+        opera_mask: xarray DataArray of the OPERA mask.
+        include_partial: whether to include partial water as water (1) or not water (0).
+
+    Returns:
+        xarray DataArray of the processed OPERA mask.
+
+    """
+    # First, we create a copy of the opera_mask to process, because we will change
+    # the values inside the numpy array
+    opera_mask_proc = opera_mask.copy()
+
+    # Any np.nan will be assigned to 3 (flagged)
+    opera_mask_proc = opera_mask.fillna(3).astype(np.uint8)
+    # Also any value > 200 will be assigned to 3 (flagged)
+    opera_mask_proc.data[opera_mask.data > 200] = 3
+
+    # Now we assign the values according to the partial water
+    if include_partial:
+        opera_mask_proc.data[opera_mask.data == 2] = 1  # partial water to water
+    else:
+        opera_mask_proc.data[opera_mask.data == 2] = 0  # partial water to no water
+
+    return opera_mask_proc
+
+
+# method to prepare the swot_mask to match the classification scheme
+# it should receive the water threshold as argument
+def process_swot_mask(swot_mask: xr.Dataset, *, water_threshold: float) -> xr.DataArray:
+    """Process SWOT mask to match SWOT classification scheme.
+
+    Args:
+        swot_mask: xarray DataArray of the SWOT mask.
+        water_threshold: float threshold to classify water pixels.
+
+    Returns:
+        xarray DataArray of the processed SWOT mask.
+
+    """
+    # First, we create a copy of the swot_mask to process
+    swot_mask_proc = swot_mask["water_frac"].copy()
+
+    # Apply the water threshold
+    swot_mask_proc.data[swot_mask_proc.data >= water_threshold] = 1  # Water
+    swot_mask_proc.data[(swot_mask_proc.data > -1) & (swot_mask_proc.data < water_threshold)] = 0
+    swot_mask_proc.data[swot_mask_proc.data < -1] = 0  # not water
+    swot_mask_proc.data[swot_mask_proc.data == -1] = 3
+    return swot_mask_proc.fillna(2).astype("uint8")
+
+
 def calc_metrics(
     ref_mask: xr.DataArray,
     pred_mask: xr.DataArray,
@@ -51,8 +155,7 @@ def calc_metrics(
     """
     # First thing is to ensure both masks have the same shape
     # Considering the ref_mask is the higher resolution, we will coarse it to match pred_mask
-    if ref_mask.shape != pred_mask.shape:
-        ref_mask = ref_mask.rio.reproject_match(pred_mask, resampling=Resampling.mode)
+    ref_mask, pred_mask = match_projections([ref_mask, pred_mask])
 
     # Convert everything to numpy
     ref_mask_np = ref_mask.to_numpy()

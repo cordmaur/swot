@@ -42,9 +42,9 @@ OPERA_COLOR_MAP = {
 OPERA_LABELS = {
     0: "Not Water",
     1: "Open Water",
-    2: "Partial Surface Water",
+    2: "Partial \nSurface Water",
     252: "Snow/Ice",
-    253: "Clouds/Cloud Shadow",
+    253: "Clouds/\nCloud Shadow",
     254: "Ocean",
     255: "No data",
 }
@@ -411,6 +411,34 @@ def open_opera_s1(aoi: BaseGeometry, date: str) -> xr.DataArray | None:
     mask_2 = mask_2.where(mask_2 < 200)
 
     cube = xr.concat([mask, mask_2], dim="img")
+    # Change partial water to value 3, this way we will have the following possibilities in the mean
+    # 0 - no water
+    # 1 - water
+    # 3 - partial water
+    # mean(0, 1) = 0.5 -> no water
+    # mean(0, 3) = 1.5 -> no water
+    # mean(1, 3) = 2.0 -> water
+    # mean(0, 0) = 0.0 -> no water
+    # mean(1, 1) = 1.0 -> water
+    # mean(3, 3) = 3.0 -> partial water
+    cube.data[cube.data == 2] = 3
+    array = cube.mean(dim="img")
+    array.data[array.data == 2] = 1
+    array.data[array.data == 3] = 2
+    array.data[array.data == 0.5] = 0
+    array.data[array.data == 1.5] = 0
+    array.attrs = mask.attrs.copy()
+
+    null_values = int(array.isnull().sum().values)  # noqa: PD003
+
+    # If there are null values, we will load the next closest image
+    if null_values == 0:
+        return mask
+
+    mask_2 = open_opera_mask(opera_df.iloc[2]["item"], aoi=aoi, crs=None)
+    mask_2 = mask_2.where(mask_2 < 200)
+
+    cube = xr.concat([array, mask_2], dim="img")
     # Change partial water to value 3, this way we will have the following possibilities in the mean
     # 0 - no water
     # 1 - water

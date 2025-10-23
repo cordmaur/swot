@@ -1,5 +1,6 @@
 """Pipeline 3: Create Reference Mask."""
 
+from functools import cache  # pyright: ignore[reportAssignmentType]
 from pathlib import Path
 from typing import cast
 
@@ -110,7 +111,7 @@ def preprocess_s2_img(s2_img: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]
 
     return s2_img, scl
 
-
+@cache # type: ignore[]
 def open_s2_img(s2_id: str, output_dir: str | Path) -> tuple[xr.DataArray, xr.DataArray]:
     """Open a Sentinel-2 image from the output directory.
 
@@ -317,7 +318,8 @@ def create_cloud_shadow_mask(
     kernel = create_shadow_cast_kernel(dx, dy)
     cloud_shadow = cast("np.ndarray", binary_dilation(clean_cloud, kernel))
 
-    # Now, we have the shadow possibly overlapping with clouds, so we remove the cloud areas from the shadow
+    # Now, we have the shadow possibly overlapping with clouds, so we remove the cloud areas from 
+    # the shadow
     cloud_shadow = ~clean_cloud & cloud_shadow
 
     return clean_cloud, cloud_shadow
