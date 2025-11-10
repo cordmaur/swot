@@ -1,7 +1,8 @@
 """Plotting functions for SWOT analysis."""
 
+from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Generator, cast
 
 import geopandas as gpd
 import matplotlib.pyplot as plt
@@ -13,6 +14,25 @@ from swot_toolkit.swot import get_swot_footprint
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
+
+
+@contextmanager
+def matplotlib_backend(backend: str) -> Generator[None, None, None]:
+    """Context manager to temporarily switch matplotlib backend.
+
+    Args:
+        backend (str): The backend to switch to (e.g., 'Agg', 'Qt5Agg').
+
+    Yields:
+        None
+
+    """
+    original_backend = plt.get_backend()
+    try:
+        plt.switch_backend(backend)
+        yield
+    finally:
+        plt.switch_backend(original_backend)
 
 
 def plot_mosaic_footprints(

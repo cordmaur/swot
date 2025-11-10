@@ -222,6 +222,8 @@ def plot_ref_mask(
     ref_mask: xr.DataArray,
     ax: Axes,
     down_factor: int = 10,
+    *,
+    add_colorbar: bool = True,
 ) -> None:
     """Plot and save the reference mask.
 
@@ -244,12 +246,14 @@ def plot_ref_mask(
         vmax=2,
         interpolation="antialiased",
         interpolation_stage="rgba",
+        add_colorbar=add_colorbar,
     )
 
     # Get the colorbar and set its ticks and labels
-    cbar = cast("Colorbar", im.colorbar)
-    cbar.set_ticks([0.33, 1, 1.66])
-    cbar.set_ticklabels(["Not Water", "Water", "No Data"])
+    if add_colorbar:
+        cbar = cast("Colorbar", im.colorbar)
+        cbar.set_ticks([0.33, 1, 1.66])
+        cbar.set_ticklabels(["Not Water", "Water", "No Data"])
 
     ax.set_title("Reference water mask")
     ax.set_aspect("equal")

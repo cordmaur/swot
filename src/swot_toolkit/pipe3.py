@@ -111,7 +111,8 @@ def preprocess_s2_img(s2_img: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]
 
     return s2_img, scl
 
-@cache # type: ignore[]
+
+@cache  # type: ignore[]
 def open_s2_img(s2_id: str, output_dir: str | Path) -> tuple[xr.DataArray, xr.DataArray]:
     """Open a Sentinel-2 image from the output directory.
 
@@ -191,6 +192,10 @@ def create_ref_mask(
     _id: str,
     *,
     reprocess: bool = False,
+    estimators: int = 100,
+    max_depth: int = 10,
+    min_samples_leaf: int = 5,
+    max_features: int | str | None = "sqrt",
 ) -> xr.DataArray:
     """Create a reference mask from the samples.
 
@@ -242,10 +247,11 @@ def create_ref_mask(
 
     print("Training the RF classifier...")
     clf = RandomForestClassifier(
-        n_estimators=100,
-        max_depth=10,
-        min_samples_leaf=5,
+        n_estimators=estimators,
+        max_depth=max_depth,
+        min_samples_leaf=min_samples_leaf,
         random_state=42,
+        max_features=max_features,
     )
     clf.fit(train_x, train_y)
 
@@ -318,7 +324,7 @@ def create_cloud_shadow_mask(
     kernel = create_shadow_cast_kernel(dx, dy)
     cloud_shadow = cast("np.ndarray", binary_dilation(clean_cloud, kernel))
 
-    # Now, we have the shadow possibly overlapping with clouds, so we remove the cloud areas from 
+    # Now, we have the shadow possibly overlapping with clouds, so we remove the cloud areas from
     # the shadow
     cloud_shadow = ~clean_cloud & cloud_shadow
 
