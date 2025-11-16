@@ -268,7 +268,7 @@ def plot_inner_swath_fig(ds: xr.Dataset, ax: Axes) -> None:
     footprint_handle = plot_footprint(ds, ax)
     inner_swath_patch = plot_inner_swath_mask(ds, ax)
 
-    ax.legend(handles=[nadir_handle, footprint_handle, inner_swath_patch])
+    ax.legend(handles=[nadir_handle, footprint_handle, inner_swath_patch], loc="upper left")
 
     ax.set_title("Inner Swath Mask (bitwise flag)")
 
@@ -292,7 +292,7 @@ def plot_wfrac_inner_swath(ds: xr.Dataset, ax: Axes) -> None:
         vmax=1,
         ax=ax,
         cmap="Blues",
-        cbar_kwargs={"label": "Water Fraction"},
+        add_colorbar=False,
     )
 
     # Plot nadir line and footprint
@@ -300,8 +300,7 @@ def plot_wfrac_inner_swath(ds: xr.Dataset, ax: Axes) -> None:
     footprint_handle = plot_footprint(ds, ax)
     inner_swath_patch = plot_inner_swath_mask(ds, ax, alpha=0.5)
 
-    ax.legend(handles=[nadir_handle, footprint_handle, inner_swath_patch])
-
+    ax.legend(handles=[nadir_handle, footprint_handle, inner_swath_patch], loc="upper left")
     ax.set_title("SWOT Water Fraction with Inner Swath Mask")
 
 
@@ -324,7 +323,7 @@ def plot_cross_track_error(ds: xr.Dataset, ax: Axes) -> None:
     footprint_handle = plot_footprint(ds, ax)
     swath_handle = plot_inner_swath_boundary(ds, ax)
 
-    ax.legend(handles=[nadir_handle, footprint_handle, swath_handle])
+    ax.legend(handles=[nadir_handle, footprint_handle, swath_handle], loc="upper left")
 
     ax.set_title("Pixels with cross_track value below 10km")
 
@@ -339,16 +338,17 @@ def inner_swath_analysis(file: str | PathLike[str]) -> Figure:
         Figure: The figure containing the plot.
 
     """
+    print(file)
     file = Path(file)
     ds = cast("xr.Dataset", xrio.open_rasterio(file, mask_and_scale=True))
 
     # Create the figure and axes
-    fig, ax = plt.subplots(2, 2, figsize=(30, 26))
+    fig, ax = plt.subplots(2, 2, figsize=(16, 16))
     # Close the figure to avoid displaying it in non-GUI backends
     plt.close(fig)
 
     # Plot water fraction
-    plot_water_fraction(ds, ax[0, 0])
+    plot_water_fraction(ds, ax[0, 0], add_colorbar=False)
     plot_inner_swath_fig(ds, ax[0, 1])
     plot_wfrac_inner_swath(ds, ax[1, 0])
     plot_cross_track_error(ds, ax[1, 1])
@@ -387,5 +387,4 @@ def plot_inner_swath_analysis(region: str, date: str) -> list[Figure]:
         file = fig.get_suptitle()
         fig.suptitle(f"Inner_swath analysis_{region}-{date}-{tile}\n{file}", fontsize=16)
 
-    # Process each file individually
     return figs

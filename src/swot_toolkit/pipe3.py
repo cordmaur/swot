@@ -48,12 +48,12 @@ SCL_SAMPLING = {
     1: 0,  # No data
     2: 0,  # No data
     3: 0,  # Cloud / Shadow
-    4: 50,  # No Water
-    5: 50,  # No Water
-    6: 100,  # Water
+    4: 100,  # No Water
+    5: 100,  # No Water
+    6: 200,  # Water
     7: 0,  # Cloud / Shadow
-    8: 50,  # Cloud / Shadow
-    9: 50,  # Cloud / Shadow
+    8: 0,  # Cloud / Shadow 50
+    9: 0,  # Cloud / Shadow 50
     10: 0,  # Cloud / Shadow
     11: 0,  # Cloud / Shadow
 }
@@ -170,6 +170,7 @@ def create_random_samples(
 
     scl_samp = cast("gpd.GeoDataFrame", scl_samp)
     scl_samp = scl_samp.set_geometry(gpd.points_from_xy(scl_samp.x, scl_samp.y))
+    scl_samp.crs = scl.rio.crs
 
     if output_dir is not None:
         output_dir = Path(output_dir) / "training_samples"
@@ -215,6 +216,8 @@ def create_ref_mask(
         print("Assigning s2_ds to cache")
         s2_ds = s2_img.to_dataset(dim="band")
         s2_df = s2_ds.to_dataframe(dim_order=["y", "x"])
+        s2_df["rgb_mean"] = s2_df[["B02", "B03", "B04"]].mean(axis=1)
+        s2_df["whiteness"] = s2_df[["B02", "B03", "B04"]].std(axis=1) / s2_df["rgb_mean"]
         s2_df = s2_df.drop(columns=["spatial_ref"])
         cache["s2_df"] = s2_df
     else:

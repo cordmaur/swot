@@ -2,7 +2,7 @@
 
 from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -16,7 +16,7 @@ from swot_toolkit.metrics import calc_metrics, process_opera_mask, process_swot_
 from swot_toolkit.pipe2 import open_output_dir
 from swot_toolkit.pipe3 import open_s2_img
 from swot_toolkit.planetary import parse_s2_id
-from swot_toolkit.swot import create_raster_mosaic
+from swot_toolkit.swot import create_raster_mosaic, create_raster_mosaic_2
 
 if TYPE_CHECKING:
     from matplotlib.colorbar import Colorbar
@@ -41,7 +41,7 @@ quality_flags_degraded = [
     "geolocation_qual_degraded",
 ]
 
-quality_flags_bad = [
+quality_flags_bad: list[str] = [
     "value_bad",
     "outside_data_window",
     # "no_pixels",
@@ -51,26 +51,27 @@ quality_flags_bad = [
 ]
 
 
-scenarios: dict[str, dict[str, None | bool | list[str]]] = {
-    "as is": {
-        "exclude_flags": None,
-        "exclude_no_data": False,
-    },
+scenarios: dict[str, dict[str, None | bool | list[str | float]]] = {
+    "as is": {"exclude_flags": None, "exclude_no_data": False, "exclude_water_area_qual": None},
     "exclude no data": {
         "exclude_flags": None,
         "exclude_no_data": True,
+        "exclude_water_area_qual": None,
     },
     "exclude bad": {
-        "exclude_flags": quality_flags_bad,
+        "exclude_flags": [*quality_flags_bad],
         "exclude_no_data": False,
+        "exclude_water_area_qual": [3],
     },
     "exclude (bad, degraded)": {
-        "exclude_flags": quality_flags_bad + quality_flags_degraded,
+        "exclude_flags": [*(quality_flags_bad + quality_flags_degraded)],
         "exclude_no_data": False,
+        "exclude_water_area_qual": [2, 3],
     },
     "exclude (bad, degraded, suspect)": {
-        "exclude_flags": quality_flags_bad + quality_flags_degraded + quality_flags_suspect,
+        "exclude_flags": [*(quality_flags_bad + quality_flags_degraded + quality_flags_suspect)],  # type: ignore
         "exclude_no_data": False,
+        "exclude_water_area_qual": [1, 2, 3],
     },
 }
 
@@ -281,6 +282,8 @@ def calc_opera_metrics(region_name: str, ref_date: str, metrics: list[str]) -> p
 
     results = pd.DataFrame()
     for dataset_name in ["opera_s2", "opera_s1"]:
+        if dataset_name not in datasets:
+            continue
         for include_partial in [False, True]:
             opera_mask_proc = process_opera_mask(
                 datasets[dataset_name],
@@ -294,7 +297,12 @@ def calc_opera_metrics(region_name: str, ref_date: str, metrics: list[str]) -> p
     return results
 
 
-def calc_swot_metrics(region_name: str, ref_date: str, metrics: list[str]) -> pd.DataFrame:
+def calc_swot_metrics(
+    region_name: str,
+    ref_date: str,
+    metrics: list[str],
+    version: Literal["v1", "v2"],
+) -> pd.DataFrame:
     """Calculate SWOT metrics for the given region and reference date.
 
     Parameters
@@ -312,6 +320,9 @@ def calc_swot_metrics(region_name: str, ref_date: str, metrics: list[str]) -> pd
         DataFrame containing the calculated metrics
 
     """
+    # First, depending on the version we shall use different quality flags
+    quality_flags = "exclude_flags" if version == "v1" else "exclude_water_area_qual"
+
     datasets = open_datasets(region_name, ref_date)
     results_swot = pd.DataFrame()
 
@@ -320,11 +331,11 @@ def calc_swot_metrics(region_name: str, ref_date: str, metrics: list[str]) -> pd
         swot_mask, _, _ = create_swot_mosaic(
             region_name=region_name,
             ref_date=ref_date,
-            exclude_flags=cast("list[str]", values["exclude_flags"]),
+            exclude_flags=cast("list[str]", values[quality_flags]),
             exclude_no_data=cast("bool", values["exclude_no_data"]),
         )
 
-        swot_mask = process_swot_mask(swot_mask, water_threshold=0.55)
+        swot_mask = process_swot_mask(swot_mask, water_threshold=0.6)
 
         stats = calc_metrics(datasets["ref_mask"], swot_mask, metrics, binary=True)
         stats = stats.rename(columns={0: scenario})
@@ -338,9 +349,10 @@ def create_swot_mosaic(
     ref_date: str,
     *,
     dst_crs: CRS | None = None,
-    exclude_flags: list[str] | None = None,
+    exclude_flags: list[str] | list[int] | None = None,
     exclude_no_data: bool = False,
     variable: str = "water_frac",
+    version: Literal["v1", "v2"] = "v2",
 ) -> tuple[xr.Dataset, list[xr.Dataset], list[np.ndarray]]:
     """Create SWOT mosaic for the given region and reference date.
 
@@ -362,13 +374,20 @@ def create_swot_mosaic(
 
     mosaic_df = pd.read_parquet(base_dir.parent / "dfs/swot_raster_results.parquet")
 
-    swot_mask, patches, no_data_masks = create_raster_mosaic(
+    if version == "v1":
+        create_raster_fn = create_raster_mosaic
+        flags = cast("None | list[str]", exclude_flags)
+    else:
+        create_raster_fn = create_raster_mosaic_2
+        flags = cast("None | list[int]", exclude_flags)
+
+    swot_mask, patches, no_data_masks = create_raster_fn(
         mosaic_df,
         ref_date=ref_date,
         aoi=aoi,
         dst_crs=dst_crs,
         variable=variable,
-        exclude_flags=exclude_flags,
+        exclude_flags=flags,  # type: ignore[]
         exclude_no_data=exclude_no_data,
     )
 

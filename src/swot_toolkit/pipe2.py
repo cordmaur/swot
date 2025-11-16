@@ -3,6 +3,7 @@
 from functools import cache
 from pathlib import Path
 
+import pandas as pd
 from matplotlib import pyplot as plt
 from shapely.geometry.base import BaseGeometry
 
@@ -18,6 +19,39 @@ from swot_toolkit.swot import auth_earthaccess
 auth_earthaccess()
 
 OUTPUT_DIR = "/data/swot/output/"
+
+
+@cache
+def open_roi(region: str) -> tuple[Path, BaseGeometry, pd.DataFrame]:
+    """Open an existing ROI directory structure for a given region.
+
+    This function opens the ROI kml and the reference S2_IDs from the directory'.
+
+    Args:
+        region (str): Path to the base output directory.
+
+    Returns:
+        tuple[Path, BaseGeometry, pd.DataFrame]: A tuple containing the dir path
+        the ROI geometry and the mosaics dataframe.
+    """
+    output_dir = Path(OUTPUT_DIR) / region
+
+    # Check if it exists
+    if not output_dir.exists():
+        msg = f"Directory not found: {output_dir}"
+        raise FileNotFoundError(msg)
+
+    # Read the AOI (the first KML found in kml folder)
+    kml_dir = output_dir / "kml"
+    kml_file = next(kml_dir.glob("*.kml"))
+    print(f"Reading KML file: {kml_file}")
+    aoi = read_kml_geometry(kml_file)[0]
+
+    # read the mosaic_df
+    mosaic_df = pd.read_parquet(output_dir / "dfs" / "swot_raster_results.parquet")
+
+    return output_dir, aoi, mosaic_df
+
 
 @cache
 def open_output_dir(region: str, date: str) -> tuple[Path, BaseGeometry, str]:
@@ -183,6 +217,9 @@ def download_opera_data(
     s2_ids: list[str],
     aoi: BaseGeometry,
     output_dir: str | Path,
+    *,
+    download_s2: bool = True,
+    download_s1: bool = True,
 ) -> None:
     """Download OPERA S2 and S1 masks for a list of S2 IDs.
 
@@ -195,5 +232,7 @@ def download_opera_data(
         None
 
     """
-    download_opera_s2_masks(s2_ids, aoi, output_dir)
-    download_opera_s1_masks(s2_ids, aoi, output_dir)
+    if download_s2:
+        download_opera_s2_masks(s2_ids, aoi, output_dir)
+    if download_s1:
+        download_opera_s1_masks(s2_ids, aoi, output_dir)
