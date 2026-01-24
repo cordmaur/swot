@@ -111,7 +111,7 @@ def process_swot_mask(swot_mask: xr.Dataset, *, water_threshold: float) -> xr.Da
 
     """
     # First, we create a copy of the swot_mask to process
-    swot_mask_proc = swot_mask["water_frac"].copy()
+    swot_mask_proc = swot_mask.copy()  # ["water_frac"].copy()
 
     # Apply the water threshold
     swot_mask_proc.data[swot_mask_proc.data >= water_threshold] = 1  # Water
@@ -126,7 +126,7 @@ def calc_metrics(
     pred_mask: xr.DataArray,
     metrics: list[str],
     *,
-    binary: bool = False,
+    binary: bool = True,
 ) -> pd.DataFrame:
     """Calculate metrics comparing reference and predicted masks.
 

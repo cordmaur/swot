@@ -64,7 +64,8 @@ def plot_mosaic_footprints(
 
     # Extract footprint geometries from SWOT items
     footprints: dict[str, BaseGeometry] = {}
-    for item in mosaic["item"]:
+    column = "item" if "item" in mosaic else "native-id"
+    for item in mosaic[column]:
         footprint, tile = get_swot_footprint(item)
         footprints[tile] = footprint
 

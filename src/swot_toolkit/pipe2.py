@@ -78,7 +78,7 @@ def open_output_dir(region: str, date: str) -> tuple[Path, BaseGeometry, str]:
     # Read the AOI (the first KML found in kml folder)
     kml_dir = output_dir.parent / "kml"
     kml_file = next(kml_dir.glob("*.kml"))
-    print(f"Reading KML file: {kml_file}")
+    # print(f"Reading KML file: {kml_file}")
     aoi = read_kml_geometry(kml_file)[0]
 
     # read the S2_IDS.json

@@ -766,14 +766,15 @@ def get_raster_footprint(ds: xr.Dataset, crs: CRS | None = None) -> Polygon:
     return footprint
 
 
-def get_swot_footprint(swot_item: earthaccess.DataGranule) -> tuple[BaseGeometry, str]:
+def get_swot_footprint(swot_item: earthaccess.DataGranule | str) -> tuple[BaseGeometry, str]:
     """Extract the footprint of a SWOT item.
 
     For the footprint, we need to access the SWOT dataset, so we will use the
     item, to open a connection to the file in the cloud.
 
     Args:
-        swot_item (earthaccess.DataGranule): The SWOT item to extract the footprint from.
+        swot_item (earthaccess.DataGranule | str): The SWOT item to extract the footprint from.
+        if a string is provided, it is assumed to be the native-id of the item.
 
     Returns:
         BaseGeometry: The footprint of the SWOT item.
@@ -781,7 +782,11 @@ def get_swot_footprint(swot_item: earthaccess.DataGranule) -> tuple[BaseGeometry
     """
     # Get the native-id of the swot item and check if the file with the footprint
     # already exists in /data/swot/footprints
-    native_id = cast("str", swot_item["meta"]["native-id"])
+    if isinstance(swot_item, str):
+        native_id = swot_item
+    else:
+        native_id = cast("str", swot_item["meta"]["native-id"])
+
     parts = native_id.split("_")
     tile_id = parts[-5]  # The tile_id is the 5th last part of the native-id
     pass_id = parts[-6]  # The pass_id is the 6th last part of the native-id
@@ -951,55 +956,19 @@ def open_raster_file(
     return ds
 
 
-def create_raster_mosaic(  # noqa: PLR0913
-    mosaic_df: pd.DataFrame,
-    ref_date: str | Timestamp,
-    aoi: BaseGeometry,
-    variable: str = "water_frac",
-    local_path: str | Path = "/data/swot/downloads",
-    exclude_flags: list[str] | None = None,
-    *,
-    dst_crs: CRS | None = None,
-    exclude_no_data: bool = False,
-) -> tuple[xr.Dataset, list[xr.Dataset], list[np.ndarray]]:
-    """Create a mosaic GeoDataFrame from SWOT data around a reference date.
-
-    The mosaic_df already has the closest observations for each tile.
+def get_swot_files(
+    mosaic_items: pd.DataFrame, local_path: str | Path = "/data/swot/downloads"
+) -> list[str]:
+    """Get SWOT files from mosaic items, checking local path first.
 
     Parameters
     ----------
-    mosaic_df : pd.DataFrame
-        DataFrame with SWOT RASTER metadata grouped by mosaic dates,
-        output from create_mosaic_df.
-    ref_date : str
-        Reference date to find closest observations for mosaic.
-    aoi : BaseGeometry
-        Area of interest for clipping the data.
-    variable :
-        The variable to extract from the raster data.
-        Default is "water_frac" for raster products.
-    local_path : str, default "/data/swot/downloads"
-        Local path to save the downloaded files.
-    exclude_flags :
-        List of quality flags to exclude from the mosaic. If None, a default set is used.
-    dst_crs : CRS | None, optional
-        The coordinate reference system to reproject the data to. If None, no reprojection is done.
-    exclude_no_data :
-        Whether to exclude no-data pixels from the mosaic. Default is False.
-
-    Returns
-    -------
-    xr.DataArray
-        DataArray with the mean value for the variable. Flagged values will be set to -1
+    mosaic_items : pd.DataFrame
+        Mosaic_df DataFrame already filtered by mosaic date.
+    local_path : str | Path, default "/data/swot/downloads"
+        Local path to check for existing files.
 
     """
-    # Find the closest items for mosaic creation
-    # Considering the mosaic_df has a 2-level index with mosaic_date and tile_name
-    # the ref_date must be in the first level and the result is a dataframe
-    mosaic_items = mosaic_df.loc[ref_date]
-
-    # Considering earthaccess.download is costly, we first try to locate the
-    # files directly on the local_path
     local_path = Path(local_path)
     mosaic_files = cast(
         "pd.Series",
@@ -1008,7 +977,7 @@ def create_raster_mosaic(  # noqa: PLR0913
 
     # If all files are found locally, we can skip the download
     if mosaic_files.all():
-        mosaic_files = cast("list[Path]", mosaic_files.to_list())
+        mosaic_files = cast("list[str]", mosaic_files.to_list())
     else:
         if "items" in mosaic_items.columns:
             items = cast("list[earthaccess.DataGranule]", mosaic_items["item"].to_list())
@@ -1021,139 +990,34 @@ def create_raster_mosaic(  # noqa: PLR0913
             pqdm_kwargs={"disable": True},
         )
 
-    # Open the patches
-    # include the quality flag in the variables list
-    variables = cast("tuple[str]", (variable, "water_area_qual_bitwise"))
-    patches = [
-        open_raster_file(
-            file, aoi=aoi, variables=variables, dst_crs=dst_crs, exclude_no_data=exclude_no_data
-        )
-        for file in mosaic_files
-    ]
-
-    # Here, even if we have the rasters clipped and in the same CRS, they may
-    # not be aligned correctly, because they may have come from different projections
-    # In this case, we will make sure they align correctly
-    patches: list[xr.Dataset] = [p.rio.reproject_match(patches[0]) for p in patches]
-
-    # Apply quality flag filtering to each patch
-    exclude_flags = [] if exclude_flags is None else exclude_flags
-
-    no_data_masks: list[np.ndarray] = []
-    for i, patch in enumerate(patches):
-        # Apply quality flag filtering to each patch
-        if exclude_no_data:
-            # Create a mask for no-data values
-            no_data_mask = mask_by_flags(
-                patch["water_area_qual_bitwise"],
-                flags=["outside_scene_bounds", "outside_data_window"],
-            )
-            patch = patch.where(~no_data_mask)  # noqa: PLW2901
-
-        # Now let's treat the quality flags
-        quality_mask = mask_by_flags(patch["water_area_qual_bitwise"], exclude_flags)
-        no_data_masks.append(quality_mask)
-
-        bitwise_flags = patch["water_area_qual_bitwise"].copy()
-
-        # The pixels that do not pass the quality mask will be set to -1 (non-observed data)
-        patches[i] = patch.where(~quality_mask, other=-1)
-        if variable == "water_frac":
-            patches[i] = patches[i].clip(max=1)
-        patches[i]["water_area_qual_bitwise"] = bitwise_flags
-
-    # Concat the patches
-    raster = xr.concat(patches, dim="idx").squeeze()
-
-    # Now we have to create a mask for the flagged pixels
-    # Considering the flagged have a value of 2, we will compute the mean
-    # If the result is different from 2, there is a valid pixel somewhere.
-    raster_mean = raster.mean(dim="idx")
-    flagged_mask = raster_mean == -1
-
-    # Now that we have the flagged mask, we can compute the mean ignoring the flags.
-    raster = raster.where(raster != -1).mean(dim="idx")
-    raster = raster.where(~flagged_mask, other=-1)
-
-    return raster, patches, no_data_masks
+    return mosaic_files
 
 
-def create_raster_mosaic_2(  # noqa: PLR0913
+def create_raster_mosaic_combined(
+    *,
     mosaic_df: pd.DataFrame,
     ref_date: str | Timestamp,
     aoi: BaseGeometry,
     variable: str = "water_frac",
     local_path: str | Path = "/data/swot/downloads",
     exclude_flags: list[int] | None = None,
-    *,
+    exclude_bitwise: list[str] | None = None,
+    exclude_geometric: bool = False,
     dst_crs: CRS | None = None,
-    exclude_no_data: bool = False,
-) -> tuple[xr.Dataset, list[xr.Dataset], list[np.ndarray]]:
-    """Create a mosaic GeoDataFrame from SWOT data around a reference date.
+):
+    # Get the items for a mosaic date
+    mosaic_items = cast("pd.DataFrame", mosaic_df.loc[ref_date])
 
-    Similar to create_raster_mosaic, but use the water_frac_qual instead of bitwise flags.
+    # Get the swot files for the specific mosaic
+    mosaic_files = get_swot_files(mosaic_items, local_path=local_path)
 
-    Parameters
-    ----------
-    mosaic_df : pd.DataFrame
-        DataFrame with SWOT RASTER metadata grouped by mosaic dates,
-        output from create_mosaic_df.
-    ref_date : str
-        Reference date to find closest observations for mosaic.
-    aoi : BaseGeometry
-        Area of interest for clipping the data.
-    variable :
-        The variable to extract from the raster data.
-        Default is "water_frac" for raster products.
-    local_path : str, default "/data/swot/downloads"
-        Local path to save the downloaded files.
-    exclude_flags : list[int] | None
-        List of quality flags to exclude from the mosaic. If None, a default set is used.
-    dst_crs : CRS | None, optional
-        The coordinate reference system to reproject the data to. If None, no reprojection is done.
-    exclude_no_data :
-        Whether to exclude no-data pixels from the mosaic. Default is False.
-
-    Returns
-    -------
-    xr.DataArray
-        DataArray with the mean value for the variable. Flagged values will be set to -1
-
-    """
-    # Find the closest items for mosaic creation
-    # Considering the mosaic_df has a 2-level index with mosaic_date and tile_name
-    # the ref_date must be in the first level and the result is a dataframe
-    mosaic_items = mosaic_df.loc[ref_date]
-
-    # Considering earthaccess.download is costly, we first try to locate the
-    # files directly on the local_path
-    local_path = Path(local_path)
-    mosaic_files = cast(
-        "pd.Series",
-        mosaic_items["native-id"].apply(lambda x: next(local_path.glob(f"{x}*"), None)),  # type: ignore[]
-    )
-
-    # If all files are found locally, we can skip the download
-    if mosaic_files.all():
-        mosaic_files = cast("list[Path]", mosaic_files.to_list())
-    else:
-        if "items" in mosaic_items.columns:
-            items = cast("list[earthaccess.DataGranule]", mosaic_items["item"].to_list())
-        else:
-            items = mosaic_items["url"].to_list()
-
-        mosaic_files = earthaccess.download(
-            items,
-            local_path=local_path,
-            pqdm_kwargs={"disable": True},
-        )
+    # Create the list of variables that are needed to open the raster files
+    variables = (variable, "water_area_qual_bitwise", "water_area_qual")
 
     # Open the patches
-    # include the quality flag in the variables list
-    variables = cast("tuple[str]", (variable, "water_area_qual"))
     patches = [
         open_raster_file(
-            file, aoi=aoi, variables=variables, dst_crs=dst_crs, exclude_no_data=exclude_no_data
+            file, aoi=aoi, variables=variables, dst_crs=dst_crs, exclude_no_data=exclude_geometric
         )
         for file in mosaic_files
     ]
@@ -1165,6 +1029,7 @@ def create_raster_mosaic_2(  # noqa: PLR0913
 
     # Apply quality flag filtering to each patch
     exclude_flags = [] if exclude_flags is None else exclude_flags
+    exclude_bitwise = [] if exclude_bitwise is None else exclude_bitwise
 
     no_data_masks: list[np.ndarray] = []
     for i, patch in enumerate(patches):
@@ -1173,28 +1038,23 @@ def create_raster_mosaic_2(  # noqa: PLR0913
         for flag in exclude_flags:
             quality_mask |= patch["water_area_qual"] == flag
 
+        # Now let's treat the quality flags
+        quality_mask |= mask_by_flags(patch["water_area_qual_bitwise"], exclude_bitwise)
+
         # Add the mask to the masks list
         no_data_masks.append(quality_mask)
 
-        original_flags = patch["water_area_qual"].copy()
-
         # The pixels that do not pass the quality mask will be set to -1 (non-observed data)
-        patches[i] = patch.where(~quality_mask, other=-1)
+        # But first, we will apply the mask only to the water fraction
+        # in order to leave the flags untouched
+        patches[i][variable] = patches[i][variable].where(~quality_mask)
         if variable == "water_frac":
-            patches[i] = patches[i].clip(max=1)
-        patches[i]["water_area_qual"] = original_flags
+            patches[i][variable] = patches[i][variable].clip(min=0, max=1)
 
-    # Concat the patches
-    raster = xr.concat(patches, dim="idx").squeeze()
+    # Concat the patches and remove the 1-dimension
+    raster_cube = xr.concat(patches, dim="idx").squeeze()
+    # Now we calculate the mean value only on the variable
+    raster_mean = raster_cube[variable].mean(dim="idx")
+    raster_mean = raster_mean.fillna(-1)
 
-    # Now we have to create a mask for the flagged pixels
-    # Considering the flagged have a value of 2, we will compute the mean
-    # If the result is different from 2, there is a valid pixel somewhere.
-    raster_mean = raster.mean(dim="idx")
-    flagged_mask = raster_mean == -1
-
-    # Now that we have the flagged mask, we can compute the mean ignoring the flags.
-    raster = raster.where(raster != -1).mean(dim="idx")
-    raster = raster.where(~flagged_mask, other=-1)
-
-    return raster, patches, no_data_masks
+    return raster_mean, patches, no_data_masks

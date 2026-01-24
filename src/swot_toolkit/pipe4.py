@@ -16,7 +16,7 @@ from swot_toolkit.metrics import calc_metrics, process_opera_mask, process_swot_
 from swot_toolkit.pipe2 import open_output_dir
 from swot_toolkit.pipe3 import open_s2_img
 from swot_toolkit.planetary import parse_s2_id
-from swot_toolkit.swot import create_raster_mosaic, create_raster_mosaic_2
+from swot_toolkit.swot import create_raster_mosaic_combined
 
 if TYPE_CHECKING:
     from matplotlib.colorbar import Colorbar
@@ -44,7 +44,7 @@ quality_flags_degraded = [
 quality_flags_bad: list[str] = [
     "value_bad",
     "outside_data_window",
-    # "no_pixels",
+    "no_pixels",
     "outside_scene_bounds",
     "inner_swath",
     "missing_karin_data",
@@ -374,21 +374,14 @@ def create_swot_mosaic(
 
     mosaic_df = pd.read_parquet(base_dir.parent / "dfs/swot_raster_results.parquet")
 
-    if version == "v1":
-        create_raster_fn = create_raster_mosaic
-        flags = cast("None | list[str]", exclude_flags)
-    else:
-        create_raster_fn = create_raster_mosaic_2
-        flags = cast("None | list[int]", exclude_flags)
-
-    swot_mask, patches, no_data_masks = create_raster_fn(
-        mosaic_df,
+    swot_mask, patches, no_data_masks = create_raster_mosaic_combined(
+        mosaic_df=mosaic_df,
         ref_date=ref_date,
         aoi=aoi,
         dst_crs=dst_crs,
         variable=variable,
-        exclude_flags=flags,  # type: ignore[]
-        exclude_no_data=exclude_no_data,
+        exclude_flags=exclude_flags,  # type: ignore[]
+        exclude_geometric=exclude_no_data,
     )
 
     return swot_mask, patches, no_data_masks
