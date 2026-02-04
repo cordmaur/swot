@@ -343,7 +343,7 @@ def inner_swath_analysis(file: str | PathLike[str]) -> Figure:
     ds = cast("xr.Dataset", xrio.open_rasterio(file, mask_and_scale=True))
 
     # Create the figure and axes
-    fig, ax = plt.subplots(2, 2, figsize=(16, 16))
+    fig, ax = plt.subplots(2, 2, figsize=(12, 12))
     # Close the figure to avoid displaying it in non-GUI backends
     plt.close(fig)
 
@@ -358,6 +358,21 @@ def inner_swath_analysis(file: str | PathLike[str]) -> Figure:
     return fig
 
 
+def get_swot_scenes_by_mosaic_dates(region: str, date: str) -> tuple[list[str], pd.DataFrame]:
+    # First, open the output directory for this region and date
+    base_dir = Path(f"/data/swot/output/{region}")
+
+    mosaic_df = pd.read_parquet(base_dir / "dfs/swot_raster_results.parquet")
+    mosaic_items = mosaic_df.loc[date]
+
+    # Get the files
+    return earthaccess.download(
+        mosaic_items["url"].to_list(),
+        local_path=DOWNLOAD_FOLDER,
+        pqdm_kwargs={"disable": True},
+    ), mosaic_items
+
+
 def plot_inner_swath_analysis(region: str, date: str) -> list[Figure]:
     """Plot the inner swath analysis for a given region and date.
 
@@ -369,18 +384,7 @@ def plot_inner_swath_analysis(region: str, date: str) -> list[Figure]:
         Figure: The figure containing the plot.
 
     """
-    # First, open the output directory for this region and date
-    base_dir = Path(f"/data/swot/output/{region}")
-
-    mosaic_df = pd.read_parquet(base_dir / "dfs/swot_raster_results.parquet")
-    mosaic_items = mosaic_df.loc[date]
-
-    # Get the files
-    mosaic_files = earthaccess.download(
-        mosaic_items["url"].to_list(),
-        local_path=DOWNLOAD_FOLDER,
-        pqdm_kwargs={"disable": True},
-    )
+    mosaic_files, mosaic_items = get_swot_scenes_by_mosaic_dates(region, date)
 
     figs = [inner_swath_analysis(file) for file in mosaic_files]
     for fig, tile in zip(figs, mosaic_items.index, strict=True):
