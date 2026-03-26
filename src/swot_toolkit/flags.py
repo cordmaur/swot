@@ -1,5 +1,9 @@
 """Quality Flags."""
 
+from enum import Enum
+from itertools import product
+from typing import NamedTuple, TypedDict
+
 import numpy as np
 import xarray as xr
 
@@ -28,6 +32,16 @@ QUALITY_FLAGS = {
     "inner_swath": 30,
     "missing_karin_data": 31,
 }
+
+# Quality flags that mark a pixel as definitively bad (not just suspect/degraded).
+QUALITY_FLAGS_BAD: list[str] = [
+    "value_bad",
+    "outside_data_window",
+    "no_pixels",
+    "outside_scene_bounds",
+    "inner_swath",
+    "missing_karin_data",
+]
 
 
 def mask_by_flags(
@@ -157,6 +171,135 @@ def decode_swot_flag(flag_value: int, *, verbose: bool = True) -> list[str]:
             print(f"  - {flag}")
 
     return active_flags
+
+
+# ---------------------------------------------------------------------------
+# Water-fraction experiment scenarios
+# ---------------------------------------------------------------------------
+
+
+class _ScenariosMeta(type):
+    """Metaclass that makes ``Scenarios`` directly iterable over all (A, B) pairs."""
+
+    def __iter__(cls) -> "_ScenariosPairIterator":  # type: ignore[override]
+        return _ScenariosPairIterator(cls)
+
+    def __len__(cls) -> int:
+        return len(cls.A) * len(cls.B)  # type: ignore[attr-defined]
+
+
+class _ScenariosPairIterator:
+    def __init__(self, cls: type) -> None:
+        self._pairs = list(product(cls.A, cls.B))  # type: ignore[attr-defined]
+        self._index = 0
+
+    def __iter__(self) -> "_ScenariosPairIterator":
+        return self
+
+    def __next__(self) -> "Scenarios.Pair":
+        if self._index >= len(self._pairs):
+            raise StopIteration
+        a, b = self._pairs[self._index]
+        col = self._index % 4 + 1
+        row = self._index // 4 + 1
+        name = f"A{row}B{col}"
+        self._index += 1
+        return Scenarios.Pair(a=a, b=b, name=name)
+
+
+#: Namespace for water-fraction experiment scenario enums.
+class Scenarios(metaclass=_ScenariosMeta):
+    """Namespace holding the Group-A and Group-B experiment scenario enums."""
+
+    class A(str, Enum):
+        """Quality-class filtering level applied to ``water_area_qual``."""
+
+        NO_FILTERING = "No filtering"
+        BAD_REMOVED = "Bad removed"
+        BAD_DEG_REMOVED = "Bad + Deg removed"
+        BAD_DEG_SUSP_REMOVED = "Bad + Deg + Susp removed"
+
+    class B(str, Enum):
+        """Bitwise-flag and geometric filtering approach."""
+
+        DEFAULT = "Default filtering"
+        BITWISE = "Bitwise filtering"
+        GEOMETRIC = "Geometric filtering"
+        BITWISE_GEOMETRIC = "Bitwise+Geometric"
+
+    class Pair(NamedTuple):
+        """A combined (A, B) scenario pair with an auto-generated experiment label."""
+
+        a: "Scenarios.A"
+        b: "Scenarios.B"
+        name: str  # e.g. "A2B3"
+
+
+class FilteringParams(TypedDict):
+    """Keyword arguments accepted by ``create_raster_mosaic_combined``."""
+
+    exclude_flags: list[int] | None
+    exclude_bitwise: list[str] | None
+    exclude_geometric: bool
+
+
+# Group-A: extra water_area_qual integer classes to exclude on top of scenario B.
+# None signals "no filtering at all" (bypass scenario B entirely).
+_A_EXTRA_FLAGS: dict[str, set[int] | None] = {
+    "No filtering": None,
+    "Bad removed": set(),
+    "Bad + Deg removed": {2},
+    "Bad + Deg + Susp removed": {1, 2},
+}
+
+# Group-B: (exclude_flags set, exclude_bitwise set | None, exclude_geometric).
+_B_SPECS: dict[str, tuple[set[int], set[str] | None, bool]] = {
+    "Default filtering": ({3}, None, False),
+    "Bitwise filtering": (set(), set(QUALITY_FLAGS_BAD) - {"no_pixels"}, False),
+    "Geometric filtering": (set(), set(QUALITY_FLAGS_BAD) - {"inner_swath"}, True),
+    "Bitwise+Geometric": (
+        set(),
+        set(QUALITY_FLAGS_BAD) - {"no_pixels", "inner_swath"},
+        True,
+    ),
+}
+
+
+def get_filtering_params(scenario_a: Scenarios.A, scenario_b: Scenarios.B) -> FilteringParams:
+    """Return filtering kwargs for ``create_raster_mosaic_combined``.
+
+    Combines a Group-A (quality-class level) scenario with a Group-B
+    (bitwise / geometric) scenario.  The result can be unpacked directly
+    with ``**`` into ``create_raster_mosaic_combined``.
+
+    Parameters
+    ----------
+    scenario_a:
+        A :class:`Scenarios.A` member.  Controls which ``water_area_qual``
+        integer classes are excluded.
+    scenario_b:
+        A :class:`Scenarios.B` member.  Controls bitwise-flag and geometric
+        filtering.  Ignored when *scenario_a* is ``Scenarios.A.NO_FILTERING``.
+
+    """
+    a_flags = _A_EXTRA_FLAGS[scenario_a]
+
+    # "No filtering" bypasses scenario B entirely.
+    if a_flags is None:
+        return FilteringParams(
+            exclude_flags=None,
+            exclude_bitwise=None,
+            exclude_geometric=False,
+        )
+
+    b_flags, b_bitwise, b_geometric = _B_SPECS[scenario_b]
+    combined_flags = b_flags | a_flags
+
+    return FilteringParams(
+        exclude_flags=sorted(combined_flags) or None,
+        exclude_bitwise=sorted(b_bitwise) if b_bitwise else None,
+        exclude_geometric=b_geometric,
+    )
 
 
 def decode_active_flags(flags_array: xr.DataArray) -> set[str]:

@@ -12,6 +12,7 @@ from matplotlib.axes import Axes
 from matplotlib.colors import ListedColormap
 from pyproj import CRS
 
+from swot_toolkit.flags import QUALITY_FLAGS_BAD as quality_flags_bad
 from swot_toolkit.metrics import calc_metrics, process_opera_mask, process_swot_mask
 from swot_toolkit.pipe2 import open_output_dir
 from swot_toolkit.pipe3 import open_s2_img
@@ -39,15 +40,6 @@ quality_flags_suspect = [
 quality_flags_degraded = [
     "classification_qual_degraded",
     "geolocation_qual_degraded",
-]
-
-quality_flags_bad: list[str] = [
-    "value_bad",
-    "outside_data_window",
-    "no_pixels",
-    "outside_scene_bounds",
-    "inner_swath",
-    "missing_karin_data",
 ]
 
 
@@ -136,7 +128,15 @@ def open_opera_s1(
 
 
 @cache
-def open_datasets(region_name: str, ref_date: str) -> dict[str, xr.DataArray]:
+def open_datasets(  # noqa: D417, PLR0913
+    region_name: str,
+    ref_date: str,
+    *,
+    s2: bool = True,
+    ref: bool = True,
+    opera_s2: bool = True,
+    opera_s1: bool = True,
+) -> dict[str, xr.DataArray]:
     """Open all datasets for a given region and reference date.
 
     Parameters
@@ -156,31 +156,38 @@ def open_datasets(region_name: str, ref_date: str) -> dict[str, xr.DataArray]:
     # Get the output dir and basic info
     output_dir, _, s2_id = open_output_dir(region_name, ref_date)
     s2_meta = parse_s2_id(s2_id)
+    sensing_date = str(s2_meta["sensing_date"])
+
     datasets: dict[str, xr.DataArray] = {}
 
     # First, let's open the  s2_img and scl datasets
-    s2_img, scl = open_s2_img(s2_id, output_dir)
-    datasets["s2_img"] = s2_img
-    datasets["scl"] = scl
+    if s2:
+        s2_img, scl = open_s2_img(s2_id, output_dir)
+        datasets["s2_img"] = s2_img
+        datasets["scl"] = scl
 
-    # Make sure everyone has the same CRS.
-    crs = s2_img.rio.crs
+        # Make sure everyone has the same CRS.
+        crs = s2_img.rio.crs
+    else:
+        crs = "epsg:4326"  # Default to WGS84 if S2 image is not opened
 
     # Open the reference mask
-    sensing_date = str(s2_meta["sensing_date"])
-    ref_mask = open_ref_mask(output_dir, sensing_date)
-    datasets["ref_mask"] = ref_mask
+    if ref:
+        ref_mask = open_ref_mask(output_dir, sensing_date)
+        datasets["ref_mask"] = ref_mask
 
     # Open OPERA S2 mask
     # OPERA S2 should have the same sensing as the original s2 image
-    opera_s2_mask = open_opera_s2(output_dir, sensing_date, crs=crs)
-    datasets["opera_s2"] = opera_s2_mask
+    if opera_s2:
+        opera_s2_mask = open_opera_s2(output_dir, sensing_date, crs=crs)
+        datasets["opera_s2"] = opera_s2_mask
 
     # Open OPERA S1 mask
     # OPERA S1 may exist or not and it may have a different sensing date. Let's get by month.
-    opera_s1_mask = open_opera_s1(output_dir, sensing_date, crs=crs)
-    if opera_s1_mask is not None:
-        datasets["opera_s1"] = opera_s1_mask
+    if opera_s1:
+        opera_s1_mask = open_opera_s1(output_dir, sensing_date, crs=crs)
+        if opera_s1_mask is not None:
+            datasets["opera_s1"] = opera_s1_mask
 
     print(f"The following datasets have been opened: {list(datasets.keys())}")
 
