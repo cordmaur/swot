@@ -202,6 +202,57 @@ class WaterFraction:
         frac = frac.where(opera_mask != _OPERA_PARTIAL_WATER, other=0.5)  # partial → 0.5
         return frac.rio.reproject_match(self.template, resampling=Resampling.average)
 
+    def process_scenario(
+        self,
+        scenario_a: Scenarios.A,
+        scenario_b: Scenarios.B,
+    ) -> dict:
+        """Compute residuals and metrics for a single (A, B) scenario pair.
+
+        Returns a dict with keys: ``residuals``, ``Bias``, ``MAE``, ``RMSE``, ``N``.
+        The ``residuals`` array is ``swot - ref`` over valid pixels only.
+        """
+        raster, _ = self.swot(scenario_a, scenario_b)
+        sat_valid, ref_valid = WaterFraction.get_valid_pairs(raster, self.ref_mask())
+        residuals = sat_valid - ref_valid
+        return {
+            "residuals": residuals,
+            "Bias": float(residuals.mean()),
+            "MAE": float(np.abs(residuals).mean()),
+            "RMSE": float(np.sqrt(np.mean(residuals**2))),
+            "N": len(residuals),
+        }
+
+    @staticmethod
+    def get_valid_pairs(
+        raster: xr.DataArray,
+        ref_mask: xr.DataArray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Extract paired (sat, ref) pixel values, discarding invalid entries.
+
+        Returns ``(sat_valid, ref_valid)`` as 1-D float16 arrays.
+        Pixels where both ref and sat are zero are excluded.
+        SAT NaNs are treated as no-water (0) to preserve bias information.
+        """
+        ref = np.asarray(ref_mask).squeeze().astype(np.float16)
+        sat = np.asarray(raster).squeeze().astype(np.float16)
+
+        if ref.shape != sat.shape:
+            msg = f"Shape mismatch: ref={ref.shape}, sat={sat.shape}"
+            raise ValueError(msg)
+
+        ref = ref.ravel()
+        sat = sat.ravel()
+
+        sat = np.nan_to_num(sat, nan=0)
+        sat[sat > 1] = 1
+        sat[sat < 0] = 0
+
+        mask = np.isfinite(ref) & np.isfinite(sat)
+        mask &= (ref > 0) | (sat > 0)
+
+        return sat[mask], ref[mask]
+
     def clear_cache(self) -> None:
         """Clear all cached datasets (except the SWOT template)."""
         self._ref_cache = None

@@ -185,12 +185,20 @@ class _ScenariosMeta(type):
         return _ScenariosPairIterator(cls)
 
     def __len__(cls) -> int:
-        return len(cls.A) * len(cls.B)  # type: ignore[attr-defined]
+        return sum(  # type: ignore[attr-defined]
+            1
+            for a, b in product(cls.A, cls.B)
+            if not (a is cls.A.NO_FILTERING and b is not cls.B.DEFAULT)
+        )
 
 
 class _ScenariosPairIterator:
     def __init__(self, cls: type) -> None:
-        self._pairs = list(product(cls.A, cls.B))  # type: ignore[attr-defined]
+        self._pairs = [  # type: ignore[attr-defined]
+            (a, b)
+            for a, b in product(cls.A, cls.B)
+            if not (a is cls.A.NO_FILTERING and b is not cls.B.DEFAULT)
+        ]
         self._index = 0
 
     def __iter__(self) -> "_ScenariosPairIterator":
@@ -200,11 +208,8 @@ class _ScenariosPairIterator:
         if self._index >= len(self._pairs):
             raise StopIteration
         a, b = self._pairs[self._index]
-        col = self._index % 4 + 1
-        row = self._index // 4 + 1
-        name = f"A{row}B{col}"
         self._index += 1
-        return Scenarios.Pair(a=a, b=b, name=name)
+        return Scenarios.Pair(a=a, b=b)
 
 
 #: Namespace for water-fraction experiment scenario enums.
@@ -232,7 +237,18 @@ class Scenarios(metaclass=_ScenariosMeta):
 
         a: "Scenarios.A"
         b: "Scenarios.B"
-        name: str  # e.g. "A2B3"
+
+        @property
+        def name(self) -> str:
+            """Short label derived from enum indices, e.g. ``'A2B3'``."""
+            a_idx = list(type(self.a)).index(self.a) + 1
+            b_idx = list(type(self.b)).index(self.b) + 1
+            return f"A{a_idx}B{b_idx}"
+
+        @property
+        def full_name(self) -> str:
+            """Human-readable description, e.g. ``'Bad removed, Bitwise filtering'``."""
+            return f"{self.a.value}, {self.b.value}"
 
 
 class FilteringParams(TypedDict):
